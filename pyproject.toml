@@ -7,10 +7,15 @@ name = "pico-tool-gateway"
 version = "0.1.0"
 description = "Composable tool proxy with approval pipeline and decoupled async approvals"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pico-ioc>=2.3.4",
+]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio", "ruff"]
+dev = ["pytest>=8", "pytest-asyncio", "ruff", "pico-testing>=0.2.0"]
+
+[project.entry-points."pico_boot.modules"]
+tool_gateway = "tool_gateway"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -20,6 +25,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pico_module = "tool_gateway"
 
 [tool.ruff]
 target-version = "py311"

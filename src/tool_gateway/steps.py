@@ -86,7 +86,7 @@ class Dispatch:
     async def __call__(self, ctx: CallContext, call_next: Next):
         started = time.monotonic()
         try:
-            result = await self._upstream.call(ctx.call.upstream_id, ctx.call.tool_name, ctx.call.arguments)
+            result = await self._upstream.invoke(ctx.call.upstream_id, ctx.call.tool_name, ctx.call.arguments)
         except Exception as exc:  # noqa: BLE001
             await ctx.audit.record("call_failed", ctx.call, error=f"{type(exc).__name__}: {exc}")
             raise UpstreamUnavailable(f"tool call failed: {exc}") from exc

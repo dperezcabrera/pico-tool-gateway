@@ -2,7 +2,19 @@
 
 A clean-room redesign of the tool proxy + approval flow: an agent's tool call runs through a **composable pipeline** of small steps, audit is a **cross-cutting wrapper**, and the three approval modes are **genuinely distinct flows** — with async approval **decoupled from the request** instead of blocking on a human.
 
-Pure Python, no framework, no I/O in the core. Fleet (or anyone) plugs real infrastructure in through ports; the domain never sees a vault, a DB or an MCP transport.
+A pico module that runs in **one process with no companion services** — no broker, no worker, no external DB. The core is pure Python (zero framework in `domain`, `pipeline`, `steps`, `approval`, `gateway`); a thin `wiring` layer registers it with pico-ioc so it drops into any pico app. Fleet (or anyone) plugs real infrastructure in through ports; the domain never sees a vault, a DB or an MCP transport.
+
+## As a pico module
+
+```python
+from pico_ioc import init
+from tool_gateway import ToolGateway
+
+container = init(modules=["tool_gateway", my_app])  # my_app registers a real Upstream
+gateway = container.get(ToolGateway)
+```
+
+Every port has a safe in-process default (`on_missing_selector`) except `Upstream` — the real tool executor is yours to wire; booting without one is fine, the first call reports it. Override any default by registering your own `@component` of the same protocol. Async approval is a durable ticket plus an in-process `resume()` call, so nothing else needs to be running.
 
 ## The pipeline
 

@@ -42,7 +42,7 @@ class SecretResolver(Protocol):
 class Upstream(Protocol):
     """The actual tool executor (an MCP session, an HTTP client, ...)."""
 
-    async def call(self, upstream_id: str, tool_name: str, arguments: dict[str, Any]) -> ToolResult: ...
+    async def invoke(self, upstream_id: str, tool_name: str, arguments: dict[str, Any]) -> ToolResult: ...
 
 
 @runtime_checkable

@@ -95,7 +95,7 @@ class EchoUpstream:
         self._echo = echo
         self.received: list[dict] = []
 
-    async def call(self, upstream_id: str, tool_name: str, arguments: dict) -> ToolResult:
+    async def invoke(self, upstream_id: str, tool_name: str, arguments: dict) -> ToolResult:
         self.received.append(arguments)
         content = {"tool": tool_name, "echo": arguments} if self._echo else {"tool": tool_name, "ok": True}
         if self._leak:
