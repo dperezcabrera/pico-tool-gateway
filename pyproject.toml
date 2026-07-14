@@ -9,6 +9,8 @@ description = "Composable tool proxy with approval pipeline and decoupled async 
 requires-python = ">=3.11"
 dependencies = [
     "pico-ioc>=2.3.4",
+    "pico-boot>=0.2.0",
+    "pico-fastapi>=0.3.1",
 ]
 
 [project.optional-dependencies]

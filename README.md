@@ -16,6 +16,25 @@ gateway = container.get(ToolGateway)
 
 Every port has a safe in-process default (`on_missing_selector`) except `Upstream` — the real tool executor is yours to wire; booting without one is fine, the first call reports it. Override any default by registering your own `@component` of the same protocol. Async approval is a durable ticket plus an in-process `resume()` call, so nothing else needs to be running.
 
+With `pico_boot.init()` the module auto-discovers via its `pico_boot.modules` entry point — an app never lists it:
+
+```python
+from pico_boot import init
+container = init(modules=[my_app])   # tool_gateway loads itself
+```
+
+## HTTP edge
+
+Installing the package brings pico-fastapi and a thin controller, so the gateway is reachable over HTTP with no extra code — include `pico_fastapi` when you boot:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/v1/tools/call` | Run a tool. Returns the result, or `{"status": "pending", "ticket_id": ...}` for async approval. |
+| `POST /api/v1/tickets/{id}/decide` | Record a human verdict (unblocks an interactive call). |
+| `POST /api/v1/tickets/{id}/resume` | Execute an approved async ticket. |
+
+Interactive callers hold the `call` request open until someone `decide`s; async callers get a ticket back at once and `resume` after approval. The controller only translates HTTP to `ToolCall`/`ToolResult` — every rule lives in the pipeline.
+
 ## The pipeline
 
 ```
