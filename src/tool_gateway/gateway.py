@@ -64,11 +64,11 @@ class ToolGateway:
         # resume: the decision is already applied by the caller; no gate
         self._post_approval = Pipeline([validate, materialize, redact, dispatch])
 
-    async def call(self, tool_call: ToolCall, *, block_async: bool = False) -> ToolResult | Pending:
-        """Run the full pipeline. ``block_async=True`` makes an async-gated
-        call block until decided (for synchronous callers like MCP) instead
-        of returning a ``Pending`` handle."""
-        ctx = CallContext(call=tool_call, audit=self._audit, block_async=block_async)
+    async def call(self, tool_call: ToolCall, *, can_block: bool = True) -> ToolResult | Pending:
+        """Run the full pipeline. ``can_block=False`` (non-blocking callers
+        like MCP) returns a ``Pending`` handle for any gated call instead of
+        waiting; the caller drives the wait itself."""
+        ctx = CallContext(call=tool_call, audit=self._audit, can_block=can_block)
         try:
             return await self._full.run(ctx)
         except PendingApproval as pending:

@@ -105,8 +105,8 @@ def test_identity_comes_from_token_not_body(harness):
     # the agent authenticates as agent-1; even if the body tried to spoof,
     # the gateway uses the verified sub. Here agent-2 has no catalog entry.
     agent2 = token(container, "agent-2@test", "agent")
-    listed = client.post("/mcp", json=rpc("tools/list"), headers=agent2).json()
-    assert listed["result"]["tools"] == []  # agent-2 sees nothing, as provisioned
+    names = {t["name"] for t in client.post("/mcp", json=rpc("tools/list"), headers=agent2).json()["result"]["tools"]}
+    assert names == {"gateway.check"}  # agent-2 has no provisioned tools, only the built-in check
 
 
 def test_operator_plane_needs_operator_role(harness):
@@ -120,25 +120,53 @@ def test_operator_plane_needs_operator_role(harness):
     assert client.post("/api/v1/tickets/tkt-x/decide", json={"status": "approved"}, headers=operator).status_code == 200
 
 
-def test_mcp_async_blocks_until_operator_decides(harness):
-    # the block-until-decided flow is unit-tested at the gateway level
-    # (test_gateway.test_async_blocks_like_interactive_when_requested); here
-    # we drive it over HTTP with a background thread approving mid-call.
-    import threading
-    import time
-
+def test_gated_call_returns_pending_not_blocked(harness):
+    # a gated tool does NOT block the agent: it returns a pending result at
+    # once, informing it to poll gateway.check
     client, container = harness
     agent = token(container, "agent-1@test", "agent")
-    operator = token(container, "admin@gw.local", "operator")
     container.get(_AllowAll).mode = ApprovalMode.ASYNC
 
-    def approve_soon():
-        time.sleep(0.3)
-        client.post("/api/v1/tickets/tkt-1/decide", json={"status": "approved", "approver": "admin"}, headers=operator)
-
-    threading.Thread(target=approve_soon, daemon=True).start()
-    resp = client.post(
+    called = client.post(
         "/mcp", json=rpc("tools/call", name="github.create_pr", arguments={"title": "gated"}), headers=agent
-    )
-    assert resp.status_code == 200
-    assert "'title': 'gated'" in resp.json()["result"]["content"][-1]["text"]
+    ).json()
+    res = called["result"]
+    assert res["isError"] is False
+    assert res["_meta"]["status"] == "pending_approval"
+    ticket = res["_meta"]["ticket_id"]
+    assert "gateway.check" in res["content"][0]["text"]
+
+    # still pending until an operator decides
+    checking = client.post(
+        "/mcp", json=rpc("tools/call", name="gateway.check", arguments={"ticket_id": ticket}), headers=agent
+    ).json()
+    assert checking["result"]["_meta"]["status"] == "pending_approval"
+
+    operator = token(container, "admin@gw.local", "operator")
+    client.post(f"/api/v1/tickets/{ticket}/decide", json={"status": "approved", "approver": "admin"}, headers=operator)
+
+    # now check returns the real result
+    done = client.post(
+        "/mcp", json=rpc("tools/call", name="gateway.check", arguments={"ticket_id": ticket}), headers=agent
+    ).json()
+    assert "'title': 'gated'" in done["result"]["content"][-1]["text"]
+
+
+def test_agent_cannot_check_another_agents_ticket(harness):
+    client, container = harness
+    agent1 = token(container, "agent-1@test", "agent")
+    agent2 = token(container, "agent-2@test", "agent")
+    container.get(_AllowAll).mode = ApprovalMode.ASYNC
+    called = client.post("/mcp", json=rpc("tools/call", name="github.create_pr", arguments={}), headers=agent1).json()
+    ticket = called["result"]["_meta"]["ticket_id"]
+    other = client.post(
+        "/mcp", json=rpc("tools/call", name="gateway.check", arguments={"ticket_id": ticket}), headers=agent2
+    ).json()
+    assert other["error"]["code"] == -32004  # not your ticket
+
+
+def test_check_tool_is_listed(harness):
+    client, container = harness
+    agent = token(container, "agent-1@test", "agent")
+    names = {t["name"] for t in client.post("/mcp", json=rpc("tools/list"), headers=agent).json()["result"]["tools"]}
+    assert "gateway.check" in names

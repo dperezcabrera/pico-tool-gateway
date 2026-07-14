@@ -27,7 +27,9 @@ container = init(modules=[my_app])   # tool_gateway loads itself
 
 Installing the package brings pico-fastapi + pico-client-auth. There are two authenticated surfaces on two identity planes:
 
-**Agent plane — MCP.** An agent's MCP client connects to `POST /mcp` (JSON-RPC `tools/list` + `tools/call`) with a Bearer token. The agent identity is the **verified `sub` claim**, never a field in the body — an agent cannot claim to be another. Under MCP a gated call **blocks until decided** (MCP is synchronous), so `async` behaves like `interactive`.
+**Agent plane — MCP.** An agent's MCP client connects to `POST /mcp` (JSON-RPC `tools/list` + `tools/call`) with a Bearer token. The agent identity is the **verified `sub` claim**, never a field in the body — an agent cannot claim to be another.
+
+A gated tool does NOT block the agent. `tools/call` returns a **pending** result at once ("approval requested, ticket X — tell the user, then call `gateway.check`"), so the agent stays free: it informs the user and moves on. When it wants the outcome it polls the built-in `gateway.check` tool with the ticket_id — still pending, denied, or the real result once an operator decides. MCP stays synchronous on the wire; the approval is asynchronous for the agent. An agent can only check its own tickets.
 
 **Operator plane — REST, `operator` role.** Humans (or an operator UI) record decisions and resume tickets:
 

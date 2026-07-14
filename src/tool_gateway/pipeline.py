@@ -19,7 +19,7 @@ class CallContext:
     call: ToolCall
     audit: AuditLog
     grant: Grant | None = None
-    block_async: bool = False  # sync callers (MCP) block on async approval instead of getting a handle
+    can_block: bool = True  # False for callers that must not wait (MCP): any gated call returns a ticket
     bag: dict[str, Any] = field(default_factory=dict)  # steps stash cross-step data here
 
 
