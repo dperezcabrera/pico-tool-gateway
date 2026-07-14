@@ -59,6 +59,25 @@ Each step is `async (ctx, call_next) -> ToolResult` — the same before/after id
 
 `call()` runs the full pipeline; `resume()` runs the post-approval pipeline (no gate — the decision exists). Both share the same steps, so the async path can never skip schema validation, secret materialization or redaction.
 
+## Policy is data, not code
+
+Which agent may run which tool, and under which approval mode, is a **declarative policy** — a JSON document, not a Python class. Just as MCP upstreams are configured (not compiled in), so is authorization. Point `tool_gateway.policy_path` at a file:
+
+```json
+{
+  "default": "deny",
+  "rules": [
+    {"tool": "github.get_*", "mode": "auto"},
+    {"tool": "*.delete_*", "mode": "interactive"},
+    {"tool": "payments.charge", "when": [{"arg": "amount_cents", "op": "le", "value": 10000}], "mode": "auto"},
+    {"tool": "payments.charge", "mode": "async"},
+    {"tool": "*", "agent": "trusted-*", "mode": "auto"}
+  ]
+}
+```
+
+Rules match on `tool` (glob), `agent` (glob or list) and `when` conditions over call arguments (`eq/ne/gt/ge/lt/le/in`); first match wins, no match falls to `default` (`deny` or a mode). An operator hot-reloads it with `POST /api/v1/policy/reload` (push a body or re-read the file) — no restart. The `DeclarativePolicy` is the default `GrantResolver`; the port stays open, so a Rego/Cedar or remote-PDP adapter drops in when you outgrow declarative rules — this is the Policy Enforcement Point, the decision engine is pluggable.
+
 ## Usage
 
 ```python

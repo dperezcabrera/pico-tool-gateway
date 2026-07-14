@@ -10,7 +10,8 @@ from pico_fastapi import controller, post
 
 from .domain import Decision, DecisionStatus, GatewayError
 from .gateway import ToolGateway, UnknownTicket
-from .ports import TicketStore
+from .policy import PolicyError
+from .ports import GrantResolver, TicketStore
 
 
 @controller(prefix="/api/v1/tickets", tags=["Tickets"])
@@ -41,3 +42,28 @@ class TicketController:
         except GatewayError as exc:
             raise HTTPException(422, str(exc)) from exc
         return {"status": "ok", "content": result.content, "is_error": result.is_error, "notes": result.notes}
+
+
+@controller(prefix="/api/v1/policy", tags=["Policy"])
+class PolicyController:
+    """Hot-reload the authorization policy without a restart. Push a new
+    ruleset in the body, or re-read the policy file if none is given."""
+
+    def __init__(self, grants: GrantResolver):
+        self._grants = grants
+
+    @requires_role("operator")
+    @post("/reload")
+    async def reload(self, body: dict | None = None):
+        try:
+            if body and "rules" in body:
+                self._grants.reload(body.get("default", "deny"), body["rules"])
+            elif hasattr(self._grants, "reload_from_file"):
+                self._grants.reload_from_file()
+            else:
+                raise HTTPException(400, "no ruleset in body and no policy file configured")
+        except PolicyError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        except AttributeError as exc:  # a non-reloadable GrantResolver was wired
+            raise HTTPException(409, "active policy source is not reloadable") from exc
+        return {"status": "reloaded"}

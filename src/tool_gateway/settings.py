@@ -9,3 +9,7 @@ from pico_ioc import configured
 @dataclass
 class ToolGatewaySettings:
     approval_timeout_seconds: float = 300.0
+    # path to a JSON policy file {"default": "deny", "rules": [...]}; the
+    # plug-and-play artifact — edit it and POST /api/v1/policy/reload. Empty
+    # means deny-all.
+    policy_path: str = ""
