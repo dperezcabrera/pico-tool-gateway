@@ -16,6 +16,7 @@ from pico_ioc import component, factory, provides
 from .adapters.memory import (
     DictGrantResolver,
     DictSecretResolver,
+    DictToolCatalog,
     ListAuditLog,
     MemoryTicketStore,
     MiniSchemaValidator,
@@ -28,6 +29,7 @@ from .ports import (
     SchemaValidator,
     SecretResolver,
     TicketStore,
+    ToolCatalog,
     Upstream,
 )
 from .settings import ToolGatewaySettings
@@ -58,6 +60,11 @@ class _DefaultTickets(MemoryTicketStore):
 @component(on_missing_selector=AuditLog)
 class _DefaultAudit(ListAuditLog):
     """In-memory audit; register a persistent AuditLog for retention."""
+
+
+@component(on_missing_selector=ToolCatalog)
+class _DefaultCatalog(DictToolCatalog):
+    """Empty by default: agents discover no tools until a catalog is wired."""
 
 
 @component(on_missing_selector=Upstream)

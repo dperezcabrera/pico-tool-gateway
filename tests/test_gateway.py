@@ -93,6 +93,19 @@ async def test_interactive_timeout_raises():
         await gw.call(a_call())  # nobody decides; 1s timeout
 
 
+async def test_async_blocks_like_interactive_when_requested():
+    # the MCP edge passes block_async=True: an async-gated call blocks until
+    # decided instead of returning a Pending handle
+    gw, grants, _s, tickets, _a = build()
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.ASYNC))
+    task = asyncio.create_task(gw.call(a_call(arguments={"title": "gated"}), block_async=True))
+    await asyncio.sleep(0.05)
+    assert not task.done()  # blocked, no handle returned
+    await tickets.decide("tkt-r1", Decision(DecisionStatus.APPROVED, approver="alice"))
+    result = await task
+    assert result.content["echo"] == {"title": "gated"}
+
+
 async def test_interactive_edit_is_applied_and_noted():
     gw, grants, _s, tickets, _a = build()
     grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.INTERACTIVE))

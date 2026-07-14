@@ -25,15 +25,19 @@ container = init(modules=[my_app])   # tool_gateway loads itself
 
 ## HTTP edge
 
-Installing the package brings pico-fastapi and a thin controller, so the gateway is reachable over HTTP with no extra code — include `pico_fastapi` when you boot:
+Installing the package brings pico-fastapi + pico-client-auth. There are two authenticated surfaces on two identity planes:
 
-| Endpoint | Purpose |
+**Agent plane — MCP.** An agent's MCP client connects to `POST /mcp` (JSON-RPC `tools/list` + `tools/call`) with a Bearer token. The agent identity is the **verified `sub` claim**, never a field in the body — an agent cannot claim to be another. Under MCP a gated call **blocks until decided** (MCP is synchronous), so `async` behaves like `interactive`.
+
+**Operator plane — REST, `operator` role.** Humans (or an operator UI) record decisions and resume tickets:
+
+| Endpoint | Auth |
 |---|---|
-| `POST /api/v1/tools/call` | Run a tool. Returns the result, or `{"status": "pending", "ticket_id": ...}` for async approval. |
-| `POST /api/v1/tickets/{id}/decide` | Record a human verdict (unblocks an interactive call). |
-| `POST /api/v1/tickets/{id}/resume` | Execute an approved async ticket. |
+| `POST /mcp` (`tools/list`, `tools/call`) | valid agent token; identity from `sub` |
+| `POST /api/v1/tickets/{id}/decide` | `operator` role |
+| `POST /api/v1/tickets/{id}/resume` | `operator` role |
 
-Interactive callers hold the `call` request open until someone `decide`s; async callers get a ticket back at once and `resume` after approval. The controller only translates HTTP to `ToolCall`/`ToolResult` — every rule lives in the pipeline.
+Tokens come from the embedded pico-server-auth or an external issuer (`AUTH_ISSUER`); with `auth_client.enabled=false` the gateway runs open for local/dev, matching the original's dev-trust posture. The controllers only translate the wire to `ToolCall`/`ToolResult` — every rule lives in the pipeline.
 
 ## The pipeline
 

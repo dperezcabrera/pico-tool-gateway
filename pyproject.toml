@@ -11,10 +11,11 @@ dependencies = [
     "pico-ioc>=2.3.4",
     "pico-boot>=0.2.0",
     "pico-fastapi>=0.3.1",
+    "pico-client-auth>=0.5.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio", "ruff", "pico-testing>=0.2.0", "httpx"]
+dev = ["pytest>=8", "pytest-asyncio", "ruff", "pico-testing>=0.2.0", "httpx", "pico-server-auth>=0.2.1"]
 
 [project.entry-points."pico_boot.modules"]
 tool_gateway = "tool_gateway"

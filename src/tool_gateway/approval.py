@@ -56,7 +56,9 @@ class ApprovalGate:
         await self._tickets.create(ticket_id, ctx.call)
         await ctx.audit.record("gated", ctx.call, approval_mode=mode.value, ticket_id=ticket_id)
 
-        if mode is ApprovalMode.ASYNC:
+        # async hands back a ticket and returns — unless the caller is
+        # synchronous (MCP), in which case it blocks like interactive
+        if mode is ApprovalMode.ASYNC and not ctx.block_async:
             raise PendingApproval(ticket_id)
 
         decision = await self._tickets.await_decision(ticket_id, timeout_seconds=self._timeout)

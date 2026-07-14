@@ -20,7 +20,7 @@ class Authorize:
         self._grants = grants
 
     async def __call__(self, ctx: CallContext, call_next: Next):
-        grant = await self._grants.resolve(ctx.call)
+        grant = await self._grants.grant_for(ctx.call)
         if grant is None:
             raise ToolNotAllowed(f"not allowed: {ctx.call.full_name}")
         ctx.grant = grant
@@ -37,7 +37,7 @@ class ValidateSchema:
 
     async def __call__(self, ctx: CallContext, call_next: Next):
         schema = ctx.grant.input_schema if ctx.grant else None
-        errors = self._validator.validate(ctx.call.arguments, schema)
+        errors = self._validator.check_args(ctx.call.arguments, schema)
         if errors:
             raise SchemaInvalid(errors)
         return await call_next(ctx)

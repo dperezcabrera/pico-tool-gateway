@@ -64,8 +64,11 @@ class ToolGateway:
         # resume: the decision is already applied by the caller; no gate
         self._post_approval = Pipeline([validate, materialize, redact, dispatch])
 
-    async def call(self, tool_call: ToolCall) -> ToolResult | Pending:
-        ctx = CallContext(call=tool_call, audit=self._audit)
+    async def call(self, tool_call: ToolCall, *, block_async: bool = False) -> ToolResult | Pending:
+        """Run the full pipeline. ``block_async=True`` makes an async-gated
+        call block until decided (for synchronous callers like MCP) instead
+        of returning a ``Pending`` handle."""
+        ctx = CallContext(call=tool_call, audit=self._audit, block_async=block_async)
         try:
             return await self._full.run(ctx)
         except PendingApproval as pending:
@@ -80,7 +83,7 @@ class ToolGateway:
             raise PendingApproval(ticket_id)
         # re-resolve the grant so schema/mode reflect current policy, not a
         # snapshot taken when the ticket was filed
-        grant = await self._grants.resolve(call)
+        grant = await self._grants.grant_for(call)
         if grant is None:
             raise ToolNotAllowed(f"no longer allowed: {call.full_name}")
         ctx = CallContext(call=call, audit=self._audit, grant=grant)

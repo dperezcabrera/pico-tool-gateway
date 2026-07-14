@@ -14,7 +14,7 @@ class GrantResolver(Protocol):
     """Authorize a call and resolve its approval mode + schema.
     Returns None when the agent may not run the tool."""
 
-    async def resolve(self, call: ToolCall) -> Grant | None: ...
+    async def grant_for(self, call: ToolCall) -> Grant | None: ...
 
 
 @runtime_checkable
@@ -23,7 +23,7 @@ class SchemaValidator(Protocol):
     Returns a list of human-readable errors (empty = valid).
     This is the piece worth reusing beyond tool calls."""
 
-    def validate(self, arguments: dict[str, Any], schema: dict[str, Any] | None) -> list[str]: ...
+    def check_args(self, arguments: dict[str, Any], schema: dict[str, Any] | None) -> list[str]: ...
 
 
 @runtime_checkable
@@ -65,3 +65,11 @@ class AuditLog(Protocol):
     audit is cross-cutting, not interleaved with logic."""
 
     async def record(self, event: str, call: ToolCall, **fields: Any) -> None: ...
+
+
+@runtime_checkable
+class ToolCatalog(Protocol):
+    """The tools an agent may discover, as MCP tool specs
+    (``{"name", "description", "inputSchema"}``). Backs ``tools/list``."""
+
+    async def tools_for(self, agent_id: str) -> list[dict[str, Any]]: ...

@@ -26,7 +26,7 @@ class DictGrantResolver:
     def allow(self, agent_id: str, full_name: str, grant: Grant) -> None:
         self._grants[(agent_id, full_name)] = grant
 
-    async def resolve(self, call: ToolCall) -> Grant | None:
+    async def grant_for(self, call: ToolCall) -> Grant | None:
         return self._grants.get((call.agent_id, call.full_name))
 
 
@@ -37,7 +37,7 @@ class MiniSchemaValidator:
 
     _PY = {"string": str, "integer": int, "number": (int, float), "boolean": bool, "object": dict, "array": list}
 
-    def validate(self, arguments: dict, schema: dict | None) -> list[str]:
+    def check_args(self, arguments: dict, schema: dict | None) -> list[str]:
         if not schema:
             return []
         errors: list[str] = []
@@ -124,7 +124,7 @@ class MemoryTicketStore:
 
     async def decide(self, ticket_id: str, decision: Decision) -> None:
         self._decisions[ticket_id] = decision
-        self._events[ticket_id].set()
+        self._events.setdefault(ticket_id, asyncio.Event()).set()
 
     async def await_decision(self, ticket_id: str, *, timeout_seconds: float) -> Decision:
         try:
@@ -132,6 +132,20 @@ class MemoryTicketStore:
         except TimeoutError:
             return Decision(status=DecisionStatus.TIMEOUT)
         return self._decisions[ticket_id]
+
+
+class DictToolCatalog:
+    """Tool specs per agent for ``tools/list``. Empty by default: an agent
+    discovers nothing until a real catalog is wired."""
+
+    def __init__(self, tools: dict[str, list[dict]] | None = None):
+        self._tools = tools or {}
+
+    def publish(self, agent_id: str, spec: dict) -> None:
+        self._tools.setdefault(agent_id, []).append(spec)
+
+    async def tools_for(self, agent_id: str) -> list[dict]:
+        return list(self._tools.get(agent_id, []))
 
 
 class ListAuditLog:

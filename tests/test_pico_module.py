@@ -24,7 +24,7 @@ class _TestUpstream(EchoUpstream):
 
 @component
 class _AllowAll:
-    async def resolve(self, call: ToolCall) -> Grant:
+    async def grant_for(self, call: ToolCall) -> Grant:
         return Grant(ApprovalMode.AUTO)
 
 
