@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio", "ruff", "pico-testing>=0.2.0"]
+dev = ["pytest>=8", "pytest-asyncio", "ruff", "pico-testing>=0.2.0", "httpx"]
 
 [project.entry-points."pico_boot.modules"]
 tool_gateway = "tool_gateway"
