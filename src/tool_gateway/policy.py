@@ -8,6 +8,7 @@ code, no companion process. Pure stdlib (fnmatch); a Rego/Cedar engine plugs
 into the same GrantResolver port when you outgrow this.
 
     default: deny
+    trust_hints_from: [bank, "internal-*"]
     rules:
       - {tool: "github.get_*", mode: auto}
       - {tool: "*.delete_*", mode: interactive}
@@ -20,7 +21,9 @@ into the same GrantResolver port when you outgrow this.
 ``hints`` match the MCP tool annotations the upstream declares, read as the
 spec does: a missing hint takes its default (destructive and open-world unless
 said otherwise) and a read-only tool is never destructive. They are claims of
-the upstream, so a policy should rely on them only for upstreams it vetted.
+the upstream, so they count only for upstreams listed in ``trust_hints_from``
+(globs); for any other upstream every hint takes its spec default, which is
+the conservative reading (possibly destructive, open world).
 """
 
 import json
@@ -47,6 +50,7 @@ _HINT_DEFAULTS = {"readOnlyHint": False, "destructiveHint": True, "idempotentHin
 
 
 def _effective_hints(annotations: dict) -> dict[str, bool]:
+    """The four hints as the spec reads them, defaults filled in."""
     hints = {k: bool(annotations[k]) if k in annotations else v for k, v in _HINT_DEFAULTS.items()}
     if hints["readOnlyHint"]:
         hints["destructiveHint"] = False
@@ -86,13 +90,13 @@ class _Rule:
     mode: ApprovalMode | None
     input_schema: dict | None
 
-    def matches(self, call: ToolCall) -> bool:
+    def matches(self, call: ToolCall, trusted: bool) -> bool:
         if not fnmatchcase(call.full_name, self.tool):
             return False
         if not any(fnmatchcase(call.agent_id, g) for g in self.agents):
             return False
         if self.hints:
-            effective = _effective_hints(call.annotations)
+            effective = _effective_hints(call.annotations if trusted else {})
             if any(effective[k] != v for k, v in self.hints.items()):
                 return False
         return all(c.holds(call.arguments) for c in self.conds)
@@ -133,23 +137,31 @@ class DeclarativePolicy:
     runtime with :meth:`reload` (an operator can push new policy without a
     restart)."""
 
-    def __init__(self, default: str = "deny", rules: list[dict] | None = None, *, path: str = ""):
+    def __init__(
+        self,
+        default: str = "deny",
+        rules: list[dict] | None = None,
+        *,
+        path: str = "",
+        trust_hints_from: list[str] | None = None,
+    ):
         self._default: Grant | None = None
         self._rules: list[_Rule] = []
+        self._trust: list[str] = []
         self._path = path
         if path:
             self.reload_from_file()
         else:
-            self.reload(default, rules or [])
+            self.reload(default, rules or [], trust_hints_from)
 
     def reload_from_file(self) -> None:
         """Re-read the JSON policy file (edit it, then reload — no restart)."""
         if not self._path:
             raise PolicyError("no policy file configured")
         doc = json.loads(Path(self._path).read_text(encoding="utf-8"))
-        self.reload(doc.get("default", "deny"), doc.get("rules") or [])
+        self.reload(doc.get("default", "deny"), doc.get("rules") or [], doc.get("trust_hints_from"))
 
-    def reload(self, default: str, rules: list[dict]) -> None:
+    def reload(self, default: str, rules: list[dict], trust_hints_from: list[str] | None = None) -> None:
         compiled = [_compile_rule(r) for r in rules]  # fail-fast on a bad ruleset
         if default == "deny":
             default_grant = None
@@ -160,9 +172,11 @@ class DeclarativePolicy:
                 raise PolicyError(f"invalid default {default!r}") from exc
         self._rules = compiled
         self._default = default_grant
+        self._trust = [str(g) for g in trust_hints_from or []]
 
     async def grant_for(self, call: ToolCall) -> Grant | None:
+        trusted = any(fnmatchcase(call.upstream_id, g) for g in self._trust)
         for rule in self._rules:
-            if rule.matches(call):
+            if rule.matches(call, trusted):
                 return None if rule.deny else Grant(rule.mode, rule.input_schema)
         return self._default

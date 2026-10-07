@@ -95,7 +95,8 @@ def gateway(upstreams: McpUpstreams) -> ToolGateway:
         rules=[
             {"tool": "*", "hints": {"readOnlyHint": True}, "mode": "auto"},
             {"tool": "*", "hints": {"destructiveHint": True}, "mode": "async"},
-        ]
+        ],
+        trust_hints_from=["bank"],
     )
     return ToolGateway(
         grants=policy,

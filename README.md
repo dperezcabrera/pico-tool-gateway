@@ -61,10 +61,38 @@ Tokens come from the embedded pico-server-auth or an external issuer (`AUTH_ISSU
 ## The pipeline
 
 ```
-authorize → approval-gate → validate-schema → materialize-secrets → redact → dispatch
+before approval:  rate-limit (50) → authorize (100)
+                  approval-gate
+after approval:   validate-schema (100) → materialize-secrets (200) → redact (300)
+                  dispatch
 ```
 
-Each step is `async (ctx, call_next) -> ToolResult` — the same before/after idiom as pico-ioc's AOP interceptors, so a step acts on the way in (authorize, gate, validate) and on the way out (redact wraps dispatch). Every step is one small class, testable alone. Audit is `audited(step, event)` applied at build time, not `audit.append(...)` sprinkled through the logic.
+Each step has `handle_call(ctx, call_next)` — the same before/after idiom as pico-ioc's AOP interceptors, so a step acts on the way in (authorize, gate, validate) and on the way out (redact wraps dispatch). Every step is one small class, testable alone, and every step's failure is audited the same way (`audited(step, event)` at assembly time), not with `audit.append(...)` sprinkled through the logic.
+
+The pipeline is assembled, not hard-wired. Any component with a `stage`, an `order` and `handle_call` (the `GatewayStep` port) is picked up from the container and slotted in by order within its stage:
+
+```python
+from pico_ioc import component
+from tool_gateway.domain import GatewayError
+from tool_gateway.pipeline import Stage
+
+
+@component
+class MonthlyQuota:
+    stage, order = Stage.BEFORE_APPROVAL, 120   # after authorize, before the gate
+
+    def __init__(self, usage: UsageStore):
+        self._usage = usage
+
+    async def handle_call(self, ctx, call_next):
+        if await self._usage.spent(ctx.call.agent_id):
+            raise GatewayError("monthly quota spent")
+        return await call_next(ctx)
+```
+
+A `BEFORE_APPROVAL` step runs once, when the call arrives (quotas, routing, enrichment). An `AFTER_APPROVAL` step runs on every execution, including `resume()` of an approved ticket (metrics, extra redaction). The gate and dispatch stay fixed: they are the boundary between the stages and the end of the chain. Everything else the steps use comes through ports, so each piece is replaced by registering another component: the policy engine, the ticket store, the audit sink, the rate limiter, the notifier, the upstream transport.
+
+**Rate limit.** `tool_gateway.rate_limit_per_minute` caps calls per agent per minute with the default `WindowRateLimiter` (0, the default, admits everything). It counts in-process, so N replicas give an agent N times the budget; register a `RateLimiter` backed by shared storage (Redis `INCR` with a TTL) when one global budget matters.
 
 ## The three approval modes
 
@@ -104,7 +132,15 @@ Rules match on `tool` (glob), `agent` (glob or list), `when` conditions over cal
 {"tool": "*", "hints": {"destructiveHint": true}, "mode": "interactive"}
 ```
 
-The keys are the four MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), read as the spec does: a missing hint takes its default (destructive and open-world unless declared otherwise), and a read-only tool is never destructive. The MCP edge copies each tool's annotations from the `ToolCatalog` into the call. Servers built with [pico-mcp](https://github.com/dperezcabrera/pico-mcp) declare them with `@tool(read_only=True)` / `@tool(destructive=True)`. Annotations are claims of the upstream: rely on them only for upstreams you vetted, and keep name-based rules first for the ones you do not.
+The keys are the four MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), read as the spec does: a missing hint takes its default (destructive and open-world unless declared otherwise), and a read-only tool is never destructive. The MCP edge copies each tool's annotations from the `ToolCatalog` into the call. Servers built with [pico-mcp](https://github.com/dperezcabrera/pico-mcp) declare them with `@tool(read_only=True)` / `@tool(destructive=True)`.
+
+Annotations are claims of the upstream, so they only count for the upstreams the policy trusts:
+
+```json
+{"default": "deny", "trust_hints_from": ["bank", "internal-*"], "rules": [...]}
+```
+
+For any other upstream every hint takes its spec default, so a server that claims `readOnlyHint: true` on a tool that deletes is still treated as possibly destructive. No upstream is trusted unless listed.
 
 An operator hot-reloads it with `POST /api/v1/policy/reload` (push a body or re-read the file) — no restart. The `DeclarativePolicy` is the default `GrantResolver`; the port stays open, so a Rego/Cedar or remote-PDP adapter drops in when you outgrow declarative rules — this is the Policy Enforcement Point, the decision engine is pluggable.
 

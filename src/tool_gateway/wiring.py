@@ -19,6 +19,7 @@ from .adapters.memory import (
     ListAuditLog,
     MemoryTicketStore,
     MiniSchemaValidator,
+    WindowRateLimiter,
 )
 from .adapters.webhook import WebhookNotifier
 from .gateway import ToolGateway
@@ -26,7 +27,9 @@ from .policy import DeclarativePolicy
 from .ports import (
     ApproverNotifier,
     AuditLog,
+    GatewayStep,
     GrantResolver,
+    RateLimiter,
     SchemaValidator,
     SecretResolver,
     TicketStore,
@@ -95,6 +98,14 @@ class _DefaultNotifier(WebhookNotifier):
         super().__init__(settings.notify_url, audit, secret=settings.notify_secret)
 
 
+@component(on_missing_selector=RateLimiter)
+class _DefaultRateLimiter(WindowRateLimiter):
+    """Per-process window from ``tool_gateway.rate_limit_per_minute`` (0: off)."""
+
+    def __init__(self, settings: ToolGatewaySettings):
+        super().__init__(settings.rate_limit_per_minute)
+
+
 @factory
 class ToolGatewayFactory:
     """Assembles the pure ToolGateway from injected ports. The core stays
@@ -111,6 +122,8 @@ class ToolGatewayFactory:
         tickets: TicketStore,
         audit: AuditLog,
         notifier: ApproverNotifier,
+        rate_limiter: RateLimiter,
+        steps: list[GatewayStep],
     ) -> ToolGateway:
         return ToolGateway(
             grants=grants,
@@ -121,4 +134,6 @@ class ToolGatewayFactory:
             audit=audit,
             approval_timeout_seconds=settings.approval_timeout_seconds,
             notifier=notifier,
+            rate_limiter=rate_limiter,
+            steps=steps,
         )

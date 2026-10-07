@@ -79,7 +79,7 @@ class PolicyController:
     async def reload(self, body: dict | None = None):
         try:
             if body and "rules" in body:
-                self._grants.reload(body.get("default", "deny"), body["rules"])
+                self._grants.reload(body.get("default", "deny"), body["rules"], body.get("trust_hints_from"))
             elif hasattr(self._grants, "reload_from_file"):
                 self._grants.reload_from_file()
             else:

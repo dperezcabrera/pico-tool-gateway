@@ -21,4 +21,6 @@ class ToolGatewaySettings:
     # webhook told about every gated call (empty: no notification); with a
     # secret the body is signed in X-Pico-Signature (HMAC-SHA256)
     notify_url: str = ""
+    # calls per agent per minute admitted by the default limiter (0: unlimited)
+    rate_limit_per_minute: int = 0
     notify_secret: str = ""

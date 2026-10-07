@@ -99,7 +99,7 @@ def annotated(tool, **hints):
 
 
 async def test_hints_route_by_tool_annotations():
-    p = DeclarativePolicy(rules=HINT_RULES)
+    p = DeclarativePolicy(rules=HINT_RULES, trust_hints_from=["bank"])
     read = await p.grant_for(annotated("bank.balance", readOnlyHint=True))
     retry_safe = await p.grant_for(annotated("bank.tag", destructiveHint=False, idempotentHint=True))
     wire = await p.grant_for(annotated("bank.wire", destructiveHint=True))
@@ -115,7 +115,9 @@ async def test_missing_hints_take_the_conservative_spec_defaults():
 
 async def test_read_only_is_never_destructive():
     # readOnlyHint without destructiveHint: the destructive default must not apply
-    p = DeclarativePolicy(rules=[{"tool": "*", "hints": {"destructiveHint": True}, "mode": "interactive"}])
+    p = DeclarativePolicy(
+        rules=[{"tool": "*", "hints": {"destructiveHint": True}, "mode": "interactive"}], trust_hints_from=["bank"]
+    )
     assert await p.grant_for(annotated("bank.balance", readOnlyHint=True)) is None
 
 
@@ -124,3 +126,29 @@ def test_invalid_hints_fail_fast():
         DeclarativePolicy(rules=[{"tool": "*", "hints": {"readonly": True}, "mode": "auto"}])
     with pytest.raises(PolicyError):
         DeclarativePolicy(rules=[{"tool": "*", "hints": {"readOnlyHint": "yes"}, "mode": "auto"}])
+
+
+async def test_hints_of_an_untrusted_upstream_take_the_conservative_defaults():
+    # a server that claims read-only is not believed unless the policy trusts it
+    p = DeclarativePolicy(rules=HINT_RULES, trust_hints_from=["bank"])
+    liar = await p.grant_for(annotated("rogue.wipe", readOnlyHint=True))
+    assert liar.approval_mode is ApprovalMode.INTERACTIVE
+
+
+async def test_no_upstream_is_trusted_by_default():
+    p = DeclarativePolicy(rules=HINT_RULES)
+    assert (await p.grant_for(annotated("bank.balance", readOnlyHint=True))).approval_mode is ApprovalMode.INTERACTIVE
+
+
+async def test_trust_takes_globs_and_reloads_from_the_file(tmp_path):
+    import json
+
+    doc = tmp_path / "policy.json"
+    doc.write_text(json.dumps({"default": "deny", "trust_hints_from": ["internal-*"], "rules": HINT_RULES}))
+    p = DeclarativePolicy(path=str(doc))
+    trusted = await p.grant_for(annotated("internal-crm.lookup", readOnlyHint=True))
+    assert trusted.approval_mode is ApprovalMode.AUTO
+    doc.write_text(json.dumps({"default": "deny", "rules": HINT_RULES}))
+    p.reload_from_file()
+    revoked = await p.grant_for(annotated("internal-crm.lookup", readOnlyHint=True))
+    assert revoked.approval_mode is ApprovalMode.INTERACTIVE

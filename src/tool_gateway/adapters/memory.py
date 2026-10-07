@@ -6,6 +6,7 @@ fleet swaps them for a vault, an MCP transport and a DB one at a time.
 
 import asyncio
 import copy
+import time
 
 from ..domain import (
     Decision,
@@ -178,3 +179,27 @@ class ListAuditLog:
 
     def actions(self) -> list[str]:
         return [e["event"] for e in self.events]
+
+
+class WindowRateLimiter:
+    """At most ``calls_per_minute`` per agent in each clock minute; 0 admits all.
+
+    ponytail: fixed window in this process. With N replicas each enforces its
+    own budget (N x the limit); a shared limiter (Redis INCR + EXPIRE) plugs
+    into the RateLimiter port when one global budget matters.
+    """
+
+    def __init__(self, calls_per_minute: int = 0, *, clock=time.time):
+        self._limit = calls_per_minute
+        self._clock = clock
+        self._window = -1
+        self._counts: dict[str, int] = {}
+
+    async def admit_call(self, agent_id: str, tool: str) -> bool:
+        if self._limit <= 0:
+            return True
+        window = int(self._clock() // 60)
+        if window != self._window:
+            self._window, self._counts = window, {}
+        self._counts[agent_id] = self._counts.get(agent_id, 0) + 1
+        return self._counts[agent_id] <= self._limit

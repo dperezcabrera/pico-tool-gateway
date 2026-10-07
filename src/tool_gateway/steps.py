@@ -4,22 +4,39 @@ opposite of the 290-line procedural method this redesign replaces."""
 import time
 
 from .domain import (
+    RateLimited,
     SchemaInvalid,
     SecretLeak,
     ToolNotAllowed,
     UpstreamUnavailable,
 )
-from .pipeline import CallContext, Next
-from .ports import GrantResolver, SchemaValidator, SecretResolver, Upstream
+from .pipeline import CallContext, Next, Stage
+from .ports import GrantResolver, RateLimiter, SchemaValidator, SecretResolver, Upstream
+
+
+class RateLimit:
+    """Turn away an agent over its call budget before any other work."""
+
+    stage, order = Stage.BEFORE_APPROVAL, 50
+
+    def __init__(self, limiter: RateLimiter):
+        self._limiter = limiter
+
+    async def handle_call(self, ctx: CallContext, call_next: Next):
+        if not await self._limiter.admit_call(ctx.call.agent_id, ctx.call.full_name):
+            raise RateLimited(f"rate limit exceeded for agent {ctx.call.agent_id}")
+        return await call_next(ctx)
 
 
 class Authorize:
     """Resolve the grant (authz + approval mode + schema) or reject."""
 
+    stage, order = Stage.BEFORE_APPROVAL, 100
+
     def __init__(self, grants: GrantResolver):
         self._grants = grants
 
-    async def __call__(self, ctx: CallContext, call_next: Next):
+    async def handle_call(self, ctx: CallContext, call_next: Next):
         grant = await self._grants.grant_for(ctx.call)
         if grant is None:
             raise ToolNotAllowed(f"not allowed: {ctx.call.full_name}")
@@ -32,10 +49,12 @@ class ValidateSchema:
     """Validate arguments against the grant's input_schema. Runs AFTER the
     approval gate so operator-edited arguments are validated too."""
 
+    stage, order = Stage.AFTER_APPROVAL, 100
+
     def __init__(self, validator: SchemaValidator):
         self._validator = validator
 
-    async def __call__(self, ctx: CallContext, call_next: Next):
+    async def handle_call(self, ctx: CallContext, call_next: Next):
         schema = ctx.grant.input_schema if ctx.grant else None
         errors = self._validator.check_args(ctx.call.arguments, schema)
         if errors:
@@ -47,10 +66,12 @@ class MaterializeSecrets:
     """Resolve secret refs just before dispatch; record which refs were used
     so the redactor can catch a buggy upstream echoing them back."""
 
+    stage, order = Stage.AFTER_APPROVAL, 200
+
     def __init__(self, secrets: SecretResolver):
         self._secrets = secrets
 
-    async def __call__(self, ctx: CallContext, call_next: Next):
+    async def handle_call(self, ctx: CallContext, call_next: Next):
         args, refs = await self._secrets.materialize(
             ctx.call.arguments, upstream_id=ctx.call.upstream_id, agent_id=ctx.call.agent_id
         )
@@ -65,10 +86,12 @@ class Redact:
     """Wrap the dispatch: redact the result fail-closed. A leak is rejected,
     never forwarded."""
 
+    stage, order = Stage.AFTER_APPROVAL, 300
+
     def __init__(self, secrets: SecretResolver):
         self._secrets = secrets
 
-    async def __call__(self, ctx: CallContext, call_next: Next):
+    async def handle_call(self, ctx: CallContext, call_next: Next):
         result = await call_next(ctx)
         try:
             return self._secrets.redact(result, upstream_id=ctx.call.upstream_id)
@@ -83,7 +106,7 @@ class Dispatch:
     def __init__(self, upstream: Upstream):
         self._upstream = upstream
 
-    async def __call__(self, ctx: CallContext, call_next: Next):
+    async def handle_call(self, ctx: CallContext, call_next: Next):
         started = time.monotonic()
         try:
             result = await self._upstream.call_tool(ctx.call)

@@ -104,3 +104,28 @@ class ApproverNotifier(Protocol):
     ticket stands whether or not the message gets through."""
 
     async def notify_approvers(self, ticket_id: str, call: ToolCall, mode: ApprovalMode) -> None: ...
+
+
+@runtime_checkable
+class RateLimiter(Protocol):
+    """Admission control per agent, checked before anything else. Back it
+    with shared storage (Redis...) when replicas must share one budget."""
+
+    async def admit_call(self, agent_id: str, tool: str) -> bool: ...
+
+
+@runtime_checkable
+class GatewayStep(Protocol):
+    """An extra pipeline step: any component with this shape is inserted at
+    ``order`` within its ``stage`` (a ``tool_gateway.pipeline.Stage``).
+
+    Built-in orders: before approval, rate limit 50 and authorize 100; after
+    approval, validate 100, materialize secrets 200, redact 300. The approval
+    gate sits between the stages and dispatch is always last. A step acts on
+    the way in before ``await call_next(ctx)`` and on the way out after it.
+    """
+
+    stage: Any
+    order: int
+
+    async def handle_call(self, ctx: Any, call_next: Any) -> ToolResult: ...

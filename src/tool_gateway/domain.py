@@ -88,6 +88,10 @@ class UpstreamUnavailable(GatewayError):
     pass
 
 
+class RateLimited(GatewayError):
+    pass
+
+
 class SchemaInvalid(GatewayError):
     def __init__(self, errors: list[str]):
         self.errors = errors

@@ -8,6 +8,7 @@ wrapper applied at build time, not calls sprinkled through the logic.
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 from .domain import GatewayError, Grant, ToolCall, ToolResult
@@ -24,32 +25,41 @@ class CallContext:
 
 
 Next = Callable[[CallContext], Awaitable[ToolResult]]
-Step = Callable[[CallContext, Next], Awaitable[ToolResult]]
+
+
+class Stage(StrEnum):
+    BEFORE_APPROVAL = "before_approval"  # first call only: authorize, rate limit, quotas
+    AFTER_APPROVAL = "after_approval"  # every execution, including resume: validate, secrets, redact
 
 
 class Pipeline:
-    def __init__(self, steps: list[Step]):
+    """Runs ``step.handle_call(ctx, call_next)`` in order; the last step is terminal."""
+
+    def __init__(self, steps: list[Any]):
         self._steps = steps
 
     async def run(self, ctx: CallContext) -> ToolResult:
         async def dispatch(i: int, ctx: CallContext) -> ToolResult:
             if i >= len(self._steps):
                 raise RuntimeError("pipeline reached the end without a terminal step")
-            return await self._steps[i](ctx, lambda c: dispatch(i + 1, c))
+            return await self._steps[i].handle_call(ctx, lambda c: dispatch(i + 1, c))
 
         return await dispatch(0, ctx)
 
 
-def audited(step: Step, event: str) -> Step:
-    """Wrap a step so its outcome is recorded once, uniformly: an ok event on
-    success, an error event carrying the exception type on a GatewayError."""
+class audited:
+    """Wrap a step so its outcome is recorded once, uniformly: an error event
+    carrying the exception type on a GatewayError. Keeps the step's place."""
 
-    async def wrapper(ctx: CallContext, call_next: Next) -> ToolResult:
+    def __init__(self, step: Any, event: str):
+        self._step = step
+        self._event = event
+        self.stage = getattr(step, "stage", None)
+        self.order = getattr(step, "order", 0)
+
+    async def handle_call(self, ctx: CallContext, call_next: Next) -> ToolResult:
         try:
-            result = await step(ctx, call_next)
+            return await self._step.handle_call(ctx, call_next)
         except GatewayError as exc:
-            await ctx.audit.audit_event(f"{event}.error", ctx.call, error=type(exc).__name__, detail=str(exc))
+            await ctx.audit.audit_event(f"{self._event}.error", ctx.call, error=type(exc).__name__, detail=str(exc))
             raise
-        return result
-
-    return wrapper

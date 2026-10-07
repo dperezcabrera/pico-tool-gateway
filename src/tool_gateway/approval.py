@@ -74,7 +74,7 @@ class ApprovalGate:
         self._timeout = timeout_seconds
         self._notifier = notifier
 
-    async def __call__(self, ctx: CallContext, call_next: Next):
+    async def handle_call(self, ctx: CallContext, call_next: Next):
         mode = ctx.grant.approval_mode if ctx.grant else ApprovalMode.AUTO
         if mode is ApprovalMode.AUTO:
             return await call_next(ctx)
