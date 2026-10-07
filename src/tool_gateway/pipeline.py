@@ -48,7 +48,7 @@ def audited(step: Step, event: str) -> Step:
         try:
             result = await step(ctx, call_next)
         except GatewayError as exc:
-            await ctx.audit.record(f"{event}.error", ctx.call, error=type(exc).__name__, detail=str(exc))
+            await ctx.audit.audit_event(f"{event}.error", ctx.call, error=type(exc).__name__, detail=str(exc))
             raise
         return result
 

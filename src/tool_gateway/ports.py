@@ -1,5 +1,9 @@
 """Ports: the seams fleet (or anyone) plugs real infrastructure into.
 
+pico-ioc matches these protocols by method names, so each name is specific
+(``call_tool``, ``audit_event``): a generic one like ``invoke`` would match
+every AOP interceptor in the container.
+
 Each is a Protocol so an adapter needs no base class. The domain and the
 pipeline depend only on these — never on a vault, a DB or an MCP transport.
 """
@@ -43,7 +47,7 @@ class Upstream(Protocol):
     """The actual tool executor (an MCP session, an HTTP client, ...). Gets the
     whole call: arguments already materialized, ``agent_id`` already verified."""
 
-    async def invoke(self, call: ToolCall) -> ToolResult: ...
+    async def call_tool(self, call: ToolCall) -> ToolResult: ...
 
 
 @runtime_checkable
@@ -75,7 +79,7 @@ class AuditLog(Protocol):
     """One sink for the whole flow; the pipeline wraps steps with it so
     audit is cross-cutting, not interleaved with logic."""
 
-    async def record(self, event: str, call: ToolCall, **fields: Any) -> None: ...
+    async def audit_event(self, event: str, call: ToolCall, **fields: Any) -> None: ...
 
 
 @runtime_checkable

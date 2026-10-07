@@ -79,7 +79,7 @@ class ApprovalGate:
 
         ticket_id = _new_ticket_id()
         await self._tickets.create(ticket_id, ctx.call)
-        await ctx.audit.record("gated", ctx.call, approval_mode=mode.value, ticket_id=ticket_id)
+        await ctx.audit.audit_event("gated", ctx.call, approval_mode=mode.value, ticket_id=ticket_id)
 
         # async always hands back a ticket; interactive blocks only if the
         # caller can wait. A non-blocking caller (MCP) gets a ticket for
@@ -88,6 +88,6 @@ class ApprovalGate:
             raise PendingApproval(ticket_id)
 
         decision = await self._tickets.await_decision(ticket_id, timeout_seconds=self._timeout)
-        await ctx.audit.record("decided", ctx.call, status=decision.status.value, approver=decision.approver)
+        await ctx.audit.audit_event("decided", ctx.call, status=decision.status.value, approver=decision.approver)
         apply_decision(ctx, decision)
         return await run_once(self._tickets, ticket_id, lambda: call_next(ctx))

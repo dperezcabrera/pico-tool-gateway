@@ -73,6 +73,8 @@ Each step is `async (ctx, call_next) -> ToolResult` — the same before/after id
 | `interactive` | Create a durable ticket, block-await a bounded decision (for a human answering in seconds). |
 | `async` | Create a ticket, return a `Pending(ticket_id)` **at once** — nothing held. A human approves out of band; execution resumes via `resume(ticket_id)`. Survives a client disconnect. |
 
+An approved ticket executes **once**. The result is stored on the ticket, so every later `gateway.check` or `/resume` returns it instead of calling the tool again; concurrent resumes race for a single claim and the losers see the ticket as still pending. A failed execution is stored as an error result too: nothing is retried behind the operator's back. Ticket ids are random (`tkt-<uuid>`), never derived from the client's request id, and a ticket keeps the call as the agent sent it (`secret://` references, not the materialized values).
+
 `call()` runs the full pipeline; `resume()` runs the post-approval pipeline (no gate — the decision exists). Both share the same steps, so the async path can never skip schema validation, secret materialization or redaction.
 
 ## Policy is data, not code
@@ -105,6 +107,25 @@ The keys are the four MCP annotations (`readOnlyHint`, `destructiveHint`, `idemp
 
 An operator hot-reloads it with `POST /api/v1/policy/reload` (push a body or re-read the file) — no restart. The `DeclarativePolicy` is the default `GrantResolver`; the port stays open, so a Rego/Cedar or remote-PDP adapter drops in when you outgrow declarative rules — this is the Policy Enforcement Point, the decision engine is pluggable.
 
+## Persistence
+
+The defaults keep tickets and audit in memory: one process, lost on restart. For durable tickets, install the `sql` extra and list one more module:
+
+```bash
+pip install "pico-tool-gateway[sql]" aiosqlite
+```
+
+```python
+container = init(modules=["tool_gateway", "tool_gateway_sql", my_app])
+```
+
+```yaml
+database:
+  url: sqlite+aiosqlite:///gateway.db   # or postgresql+asyncpg://... for several replicas
+```
+
+`tool_gateway_sql` replaces the `TicketStore` and `AuditLog` defaults with pico-sqlalchemy tables (`tool_gateway_tickets`, `tool_gateway_audit`) and creates them at startup if missing. A ticket survives a restart and is resumed by whichever process the operator reaches. The run-once claim is a conditional `UPDATE`, so it holds across replicas sharing the database, and an interactive wait polls the ticket row (every 0.5 s) so it also sees a decision recorded by another replica.
+
 ## Usage
 
 ```python
@@ -135,7 +156,7 @@ Here the orchestration is a list of composable steps, audit is declarative, and 
 
 ## Ports to implement for production
 
-`GrantResolver`, `SchemaValidator`, `SecretResolver`, `Upstream`, `TicketStore`, `AuditLog`, `ToolCatalog` (see `ports.py`). MCP servers are covered by `adapters/mcp_upstreams.py`; the `adapters/memory.py` set is a complete, runnable reference for the rest — swap them one at a time for a vault and a database.
+`GrantResolver`, `SchemaValidator`, `SecretResolver`, `Upstream`, `TicketStore`, `AuditLog`, `ToolCatalog` (see `ports.py`). MCP servers are covered by `adapters/mcp_upstreams.py` and the database by `tool_gateway_sql`; the `adapters/memory.py` set is a complete, runnable reference for the rest. pico-ioc matches ports by method name, so the names are specific (`call_tool`, `audit_event`): an adapter method called `invoke` would be confused with an AOP interceptor.
 
 ## Development
 

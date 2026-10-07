@@ -24,7 +24,7 @@ class Authorize:
         if grant is None:
             raise ToolNotAllowed(f"not allowed: {ctx.call.full_name}")
         ctx.grant = grant
-        await ctx.audit.record("authorized", ctx.call, approval_mode=grant.approval_mode.value)
+        await ctx.audit.audit_event("authorized", ctx.call, approval_mode=grant.approval_mode.value)
         return await call_next(ctx)
 
 
@@ -57,7 +57,7 @@ class MaterializeSecrets:
         ctx.call.arguments = args
         if refs:
             ctx.bag["materialized_refs"] = refs
-            await ctx.audit.record("refs_materialized", ctx.call, refs=refs)
+            await ctx.audit.audit_event("refs_materialized", ctx.call, refs=refs)
         return await call_next(ctx)
 
 
@@ -73,7 +73,7 @@ class Redact:
         try:
             return self._secrets.redact(result, upstream_id=ctx.call.upstream_id)
         except SecretLeak:
-            await ctx.audit.record("leak_detected", ctx.call)
+            await ctx.audit.audit_event("leak_detected", ctx.call)
             raise
 
 
@@ -86,13 +86,13 @@ class Dispatch:
     async def __call__(self, ctx: CallContext, call_next: Next):
         started = time.monotonic()
         try:
-            result = await self._upstream.invoke(ctx.call)
+            result = await self._upstream.call_tool(ctx.call)
         except Exception as exc:  # noqa: BLE001
-            await ctx.audit.record("call_failed", ctx.call, error=f"{type(exc).__name__}: {exc}")
+            await ctx.audit.audit_event("call_failed", ctx.call, error=f"{type(exc).__name__}: {exc}")
             raise UpstreamUnavailable(f"tool call failed: {exc}") from exc
         result.elapsed_ms = int((time.monotonic() - started) * 1000)
         note = ctx.bag.get("edit_note")
         if note:
             result.notes.insert(0, note)
-        await ctx.audit.record("call", ctx.call, elapsed_ms=result.elapsed_ms, is_error=result.is_error)
+        await ctx.audit.audit_event("call", ctx.call, elapsed_ms=result.elapsed_ms, is_error=result.is_error)
         return result

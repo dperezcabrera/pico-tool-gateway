@@ -58,21 +58,21 @@ async def test_catalog_lists_prefixed_tools_with_their_annotations():
     assert tools["bank.wire"]["inputSchema"]["required"] == ["account", "cents"]
 
 
-async def test_invoke_runs_the_tool_and_passes_the_verified_agent():
-    result = await McpUpstreams({"bank": bank()}).invoke(call("bank.wire", agent="agent-7", account="a", cents=5))
+async def test_call_tool_runs_the_tool_and_passes_the_verified_agent():
+    result = await McpUpstreams({"bank": bank()}).call_tool(call("bank.wire", agent="agent-7", account="a", cents=5))
     assert result.is_error is False
     assert json.loads(result.content) == {"sent": 5, "by": "agent-7"}  # untyped dict: text content
 
 
 async def test_tool_failure_is_an_error_result():
-    result = await McpUpstreams({"bank": bank()}).invoke(call("bank.broken"))
+    result = await McpUpstreams({"bank": bank()}).call_tool(call("bank.broken"))
     assert result.is_error is True
     assert result.content == "Error executing tool broken"  # the server hides internal exception text
 
 
 async def test_unknown_upstream_is_named():
     with pytest.raises(UpstreamUnavailable, match="no upstream 'crm'"):
-        await McpUpstreams({"bank": bank()}).invoke(call("crm.lookup"))
+        await McpUpstreams({"bank": bank()}).call_tool(call("crm.lookup"))
 
 
 async def test_unreachable_upstream_fails_the_listing_loudly():
@@ -138,6 +138,6 @@ async def test_default_wiring_reads_upstreams_from_config():
 async def test_default_wiring_without_upstreams_names_the_gap():
     container = init(modules=["tool_gateway"], config=configuration(DictSource({})))
     with pytest.raises(UpstreamUnavailable, match="no upstream 'github'"):
-        await container.get(Upstream).invoke(call("github.create_pr"))
+        await container.get(Upstream).call_tool(call("github.create_pr"))
     assert await container.get(ToolCatalog).tools_for("agent-1") == []
     container.shutdown()

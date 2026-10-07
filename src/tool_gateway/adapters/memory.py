@@ -97,7 +97,7 @@ class EchoUpstream:
         self._echo = echo
         self.received: list[dict] = []
 
-    async def invoke(self, call: ToolCall) -> ToolResult:
+    async def call_tool(self, call: ToolCall) -> ToolResult:
         self.received.append(call.arguments)
         content = (
             {"tool": call.tool_name, "echo": call.arguments} if self._echo else {"tool": call.tool_name, "ok": True}
@@ -165,7 +165,7 @@ class ListAuditLog:
     def __init__(self):
         self.events: list[dict] = []
 
-    async def record(self, event: str, call: ToolCall, **fields) -> None:
+    async def audit_event(self, event: str, call: ToolCall, **fields) -> None:
         self.events.append({"event": event, "tool": call.full_name, "agent": call.agent_id, **fields})
 
     def actions(self) -> list[str]:

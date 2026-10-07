@@ -16,7 +16,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio", "ruff", "pico-testing>=0.2.0", "httpx", "pico-server-auth>=0.2.1"]
+sql = ["pico-sqlalchemy>=0.5.3"]
+dev = ["pytest>=8", "pytest-asyncio", "ruff", "pico-testing>=0.2.0", "httpx", "pico-server-auth>=0.2.1", "pico-sqlalchemy>=0.5.3", "aiosqlite"]
 
 [project.entry-points."pico_boot.modules"]
 tool_gateway = "tool_gateway"

@@ -39,7 +39,7 @@ class McpUpstreams:
             self._listing, self._listed_at = listing, time.monotonic()
         return self._listing
 
-    async def invoke(self, call: ToolCall) -> ToolResult:
+    async def call_tool(self, call: ToolCall) -> ToolResult:
         target = self._targets.get(call.upstream_id)
         if target is None:
             raise UpstreamUnavailable(f"no upstream {call.upstream_id!r}: add it to tool_gateway.upstreams")

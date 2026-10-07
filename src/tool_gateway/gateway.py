@@ -90,5 +90,5 @@ class ToolGateway:
             raise ToolNotAllowed(f"no longer allowed: {call.full_name}")
         ctx = CallContext(call=call, audit=self._audit, grant=grant)
         apply_decision(ctx, decision)
-        await self._audit.record("resumed", call, status=decision.status.value, approver=decision.approver)
+        await self._audit.audit_event("resumed", call, status=decision.status.value, approver=decision.approver)
         return await run_once(self._tickets, ticket_id, lambda: self._post_approval.run(ctx))
