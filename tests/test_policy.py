@@ -83,3 +83,44 @@ def test_invalid_ruleset_fails_fast():
         DeclarativePolicy(rules=[{"tool": "*", "mode": "nonsense"}])
     with pytest.raises(PolicyError):
         DeclarativePolicy(rules=[{"tool": "*", "when": [{"arg": "x", "op": "??", "value": 1}], "mode": "auto"}])
+
+
+HINT_RULES = [
+    {"tool": "*", "hints": {"readOnlyHint": True}, "mode": "auto"},
+    {"tool": "*", "hints": {"destructiveHint": False, "idempotentHint": True}, "mode": "auto"},
+    {"tool": "*", "hints": {"destructiveHint": True}, "mode": "interactive"},
+]
+
+
+def annotated(tool, **hints):
+    c = call(tool)
+    c.annotations = hints
+    return c
+
+
+async def test_hints_route_by_tool_annotations():
+    p = DeclarativePolicy(rules=HINT_RULES)
+    read = await p.grant_for(annotated("bank.balance", readOnlyHint=True))
+    retry_safe = await p.grant_for(annotated("bank.tag", destructiveHint=False, idempotentHint=True))
+    wire = await p.grant_for(annotated("bank.wire", destructiveHint=True))
+    assert read.approval_mode is ApprovalMode.AUTO
+    assert retry_safe.approval_mode is ApprovalMode.AUTO
+    assert wire.approval_mode is ApprovalMode.INTERACTIVE
+
+
+async def test_missing_hints_take_the_conservative_spec_defaults():
+    p = DeclarativePolicy(rules=HINT_RULES)
+    assert (await p.grant_for(annotated("bank.unknown"))).approval_mode is ApprovalMode.INTERACTIVE
+
+
+async def test_read_only_is_never_destructive():
+    # readOnlyHint without destructiveHint: the destructive default must not apply
+    p = DeclarativePolicy(rules=[{"tool": "*", "hints": {"destructiveHint": True}, "mode": "interactive"}])
+    assert await p.grant_for(annotated("bank.balance", readOnlyHint=True)) is None
+
+
+def test_invalid_hints_fail_fast():
+    with pytest.raises(PolicyError):
+        DeclarativePolicy(rules=[{"tool": "*", "hints": {"readonly": True}, "mode": "auto"}])
+    with pytest.raises(PolicyError):
+        DeclarativePolicy(rules=[{"tool": "*", "hints": {"readOnlyHint": "yes"}, "mode": "auto"}])

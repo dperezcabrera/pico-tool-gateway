@@ -26,6 +26,8 @@ class ToolCall:
     upstream_id: str
     tool_name: str
     arguments: dict[str, Any] = field(default_factory=dict)
+    # MCP tool annotations (readOnlyHint, destructiveHint...) as the catalog lists them
+    annotations: dict[str, Any] = field(default_factory=dict)
 
     @property
     def full_name(self) -> str:

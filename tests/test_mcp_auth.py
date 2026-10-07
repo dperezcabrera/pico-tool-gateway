@@ -38,8 +38,10 @@ class _Upstream(EchoUpstream):
 class _AllowAll:
     def __init__(self):
         self.mode = ApprovalMode.AUTO
+        self.last: ToolCall | None = None
 
     async def grant_for(self, call: ToolCall) -> Grant:
+        self.last = call
         return Grant(self.mode)
 
 
@@ -47,7 +49,16 @@ class _AllowAll:
 class _Catalog(DictToolCatalog):
     def __init__(self):
         super().__init__(
-            {"agent-1@test": [{"name": "github.create_pr", "description": "open a PR", "inputSchema": {}}]}
+            {
+                "agent-1@test": [
+                    {
+                        "name": "github.create_pr",
+                        "description": "open a PR",
+                        "inputSchema": {},
+                        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+                    }
+                ]
+            }
         )
 
 
@@ -170,3 +181,10 @@ def test_check_tool_is_listed(harness):
     agent = token(container, "agent-1@test", "agent")
     names = {t["name"] for t in client.post("/mcp", json=rpc("tools/list"), headers=agent).json()["result"]["tools"]}
     assert "gateway.check" in names
+
+
+def test_call_carries_the_catalog_annotations_to_the_policy(harness):
+    client, container = harness
+    agent = token(container, "agent-1@test", "agent")
+    client.post("/mcp", json=rpc("tools/call", name="github.create_pr", arguments={}), headers=agent)
+    assert container.get(_AllowAll).last.annotations == {"readOnlyHint": False, "destructiveHint": False}

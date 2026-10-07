@@ -14,6 +14,13 @@ into the same GrantResolver port when you outgrow this.
       - {tool: "payments.charge", when: [{arg: amount_cents, op: le, value: 10000}], mode: auto}
       - {tool: "payments.charge", mode: interactive}   # larger charges
       - {tool: "*", agent: "trusted-*", mode: async}
+      - {tool: "*", hints: {readOnlyHint: true}, mode: auto}
+      - {tool: "*", hints: {destructiveHint: true}, mode: interactive}
+
+``hints`` match the MCP tool annotations the upstream declares, read as the
+spec does: a missing hint takes its default (destructive and open-world unless
+said otherwise) and a read-only tool is never destructive. They are claims of
+the upstream, so a policy should rely on them only for upstreams it vetted.
 """
 
 import json
@@ -33,6 +40,17 @@ _OPS = {
     "le": lambda a, b: _num(a) <= _num(b),
     "in": lambda a, b: a in b,
 }
+
+
+# MCP spec defaults for an absent annotation
+_HINT_DEFAULTS = {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": True}
+
+
+def _effective_hints(annotations: dict) -> dict[str, bool]:
+    hints = {k: bool(annotations[k]) if k in annotations else v for k, v in _HINT_DEFAULTS.items()}
+    if hints["readOnlyHint"]:
+        hints["destructiveHint"] = False
+    return hints
 
 
 class PolicyError(Exception):
@@ -63,6 +81,7 @@ class _Rule:
     tool: str
     agents: list[str]
     conds: list[_Cond]
+    hints: dict[str, bool]
     deny: bool
     mode: ApprovalMode | None
     input_schema: dict | None
@@ -72,6 +91,10 @@ class _Rule:
             return False
         if not any(fnmatchcase(call.agent_id, g) for g in self.agents):
             return False
+        if self.hints:
+            effective = _effective_hints(call.annotations)
+            if any(effective[k] != v for k, v in self.hints.items()):
+                return False
         return all(c.holds(call.arguments) for c in self.conds)
 
 
@@ -90,10 +113,15 @@ def _compile_rule(raw: dict) -> _Rule:
         if c.get("op") not in _OPS:
             raise PolicyError(f"invalid op {c.get('op')!r}")
         conds.append(_Cond(arg=str(c["arg"]), op=c["op"], value=c.get("value")))
+    hints = raw.get("hints") or {}
+    for key, value in hints.items():
+        if key not in _HINT_DEFAULTS or not isinstance(value, bool):
+            raise PolicyError(f"invalid hint {key!r}: {value!r}")
     return _Rule(
         tool=str(raw.get("tool", "*")),
         agents=agents,
         conds=conds,
+        hints=hints,
         deny=deny,
         mode=mode,
         input_schema=raw.get("input_schema"),

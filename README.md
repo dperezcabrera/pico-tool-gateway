@@ -76,7 +76,18 @@ Which agent may run which tool, and under which approval mode, is a **declarativ
 }
 ```
 
-Rules match on `tool` (glob), `agent` (glob or list) and `when` conditions over call arguments (`eq/ne/gt/ge/lt/le/in`); first match wins, no match falls to `default` (`deny` or a mode). An operator hot-reloads it with `POST /api/v1/policy/reload` (push a body or re-read the file) — no restart. The `DeclarativePolicy` is the default `GrantResolver`; the port stays open, so a Rego/Cedar or remote-PDP adapter drops in when you outgrow declarative rules — this is the Policy Enforcement Point, the decision engine is pluggable.
+Rules match on `tool` (glob), `agent` (glob or list), `when` conditions over call arguments (`eq/ne/gt/ge/lt/le/in`) and `hints` over the tool's MCP annotations; first match wins, no match falls to `default` (`deny` or a mode).
+
+`hints` route by what a tool declares about itself instead of by name, so one policy covers every upstream:
+
+```json
+{"tool": "*", "hints": {"readOnlyHint": true}, "mode": "auto"},
+{"tool": "*", "hints": {"destructiveHint": true}, "mode": "interactive"}
+```
+
+The keys are the four MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), read as the spec does: a missing hint takes its default (destructive and open-world unless declared otherwise), and a read-only tool is never destructive. The MCP edge copies each tool's annotations from the `ToolCatalog` into the call. Servers built with [pico-mcp](https://github.com/dperezcabrera/pico-mcp) declare them with `@tool(read_only=True)` / `@tool(destructive=True)`. Annotations are claims of the upstream: rely on them only for upstreams you vetted, and keep name-based rules first for the ones you do not.
+
+An operator hot-reloads it with `POST /api/v1/policy/reload` (push a body or re-read the file) — no restart. The `DeclarativePolicy` is the default `GrantResolver`; the port stays open, so a Rego/Cedar or remote-PDP adapter drops in when you outgrow declarative rules — this is the Policy Enforcement Point, the decision engine is pluggable.
 
 ## Usage
 

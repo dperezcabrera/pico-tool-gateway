@@ -90,8 +90,14 @@ class McpController:
         if "." not in full_name:
             return _error(rid, -32602, f"tool name must be 'upstream.tool', got {full_name!r}")
         upstream_id, _, tool_name = full_name.partition(".")
+        spec = next((t for t in await self._catalog.tools_for(agent_id) if t.get("name") == full_name), {})
         call = ToolCall(
-            request_id=str(rid), agent_id=agent_id, upstream_id=upstream_id, tool_name=tool_name, arguments=arguments
+            request_id=str(rid),
+            agent_id=agent_id,
+            upstream_id=upstream_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            annotations=spec.get("annotations") or {},
         )
         try:
             outcome = await self._gw.call(call, can_block=False)  # never hold the agent
