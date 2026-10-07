@@ -63,6 +63,16 @@ class Decision:
         return self.status is DecisionStatus.APPROVED
 
 
+@dataclass
+class Ticket:
+    """A gated call as the store keeps it. ``result`` is set once, by the
+    single execution that follows an approval."""
+
+    call: ToolCall
+    decision: Decision
+    result: ToolResult | None = None
+
+
 # ── control signals / errors ─────────────────────────────────────
 
 

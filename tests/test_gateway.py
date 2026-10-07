@@ -20,7 +20,7 @@ from tool_gateway.adapters.memory import (
     MemoryTicketStore,
     MiniSchemaValidator,
 )
-from tool_gateway.domain import ApprovalDenied, SchemaInvalid, SecretLeak, ToolNotAllowed
+from tool_gateway.domain import ApprovalDenied, PendingApproval, SchemaInvalid, SecretLeak, ToolNotAllowed, ToolResult
 from tool_gateway.gateway import Pending
 
 
@@ -41,6 +41,10 @@ def build(*, grants=None, secrets=None, leak=None, echo=True):
     )
     gw._test_upstream = upstream  # expose the fake for assertions
     return gw, grant_resolver, secret_resolver, tickets, audit
+
+
+def gated_ticket(audit) -> str:
+    return next(e["ticket_id"] for e in audit.events if e["event"] == "gated")
 
 
 def a_call(**kw):
@@ -69,7 +73,7 @@ async def test_interactive_blocks_then_approves():
     task = asyncio.create_task(gw.call(a_call(arguments={"title": "ship"})))
     await asyncio.sleep(0.05)  # let it reach the gate and block
     assert not task.done()
-    await tickets.decide("tkt-r1", Decision(DecisionStatus.APPROVED, approver="alice"))
+    await tickets.decide(gated_ticket(audit), Decision(DecisionStatus.APPROVED, approver="alice"))
     result = await task
     assert result.content["echo"] == {"title": "ship"}
     assert "approval" not in "".join(audit.actions())  # no error event
@@ -77,11 +81,11 @@ async def test_interactive_blocks_then_approves():
 
 
 async def test_interactive_rejected_raises():
-    gw, grants, _s, tickets, _a = build()
+    gw, grants, _s, tickets, audit = build()
     grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.INTERACTIVE))
     task = asyncio.create_task(gw.call(a_call()))
     await asyncio.sleep(0.05)
-    await tickets.decide("tkt-r1", Decision(DecisionStatus.REJECTED, approver="bob", reason="nope"))
+    await tickets.decide(gated_ticket(audit), Decision(DecisionStatus.REJECTED, approver="bob", reason="nope"))
     with pytest.raises(ApprovalDenied):
         await task
 
@@ -106,12 +110,12 @@ async def test_non_blocking_caller_gets_a_ticket_for_interactive_too():
 
 
 async def test_interactive_edit_is_applied_and_noted():
-    gw, grants, _s, tickets, _a = build()
+    gw, grants, _s, tickets, audit = build()
     grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.INTERACTIVE))
     task = asyncio.create_task(gw.call(a_call(arguments={"title": "typo"})))
     await asyncio.sleep(0.05)
     await tickets.decide(
-        "tkt-r1", Decision(DecisionStatus.APPROVED, approver="alice", edited_arguments={"title": "fixed"})
+        gated_ticket(audit), Decision(DecisionStatus.APPROVED, approver="alice", edited_arguments={"title": "fixed"})
     )
     result = await task
     assert result.content["echo"] == {"title": "fixed"}  # executed the EDIT
@@ -173,3 +177,57 @@ async def test_audit_trail_is_complete_for_auto():
     grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.AUTO))
     await gw.call(a_call(arguments={"title": "x"}))
     assert "authorized" in audit.actions() and "call" in audit.actions()
+
+
+async def test_approved_ticket_executes_once_however_often_it_is_resumed():
+    gw, grants, _s, tickets, _a = build()
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.ASYNC))
+    pending = await gw.call(a_call(arguments={"title": "once"}))
+    await tickets.decide(pending.ticket_id, Decision(DecisionStatus.APPROVED, approver="carol"))
+    first = await gw.resume(pending.ticket_id)
+    again = await gw.resume(pending.ticket_id)
+    assert gw._test_upstream.received == [{"title": "once"}]
+    assert again.content == first.content
+
+
+async def test_concurrent_resumes_execute_once():
+    gw, grants, _s, tickets, _a = build()
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.ASYNC))
+    pending = await gw.call(a_call())
+    await tickets.decide(pending.ticket_id, Decision(DecisionStatus.APPROVED, approver="carol"))
+    outcomes = await asyncio.gather(*(gw.resume(pending.ticket_id) for _ in range(3)), return_exceptions=True)
+    assert len(gw._test_upstream.received) == 1
+    assert all(isinstance(o, (ToolResult, PendingApproval)) for o in outcomes)
+
+
+async def test_interactive_ticket_is_not_executed_again_by_resume():
+    gw, grants, _s, tickets, audit = build()
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.INTERACTIVE))
+    task = asyncio.create_task(gw.call(a_call(arguments={"title": "x"})))
+    await asyncio.sleep(0.05)
+    ticket_id = gated_ticket(audit)
+    await tickets.decide(ticket_id, Decision(DecisionStatus.APPROVED, approver="alice"))
+    await task
+    await gw.resume(ticket_id)
+    assert len(gw._test_upstream.received) == 1
+
+
+async def test_ticket_ids_do_not_collide_on_repeated_request_ids():
+    gw, grants, _s, tickets, _a = build()
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.ASYNC))
+    first = await gw.call(a_call(arguments={"n": 1}))
+    second = await gw.call(a_call(arguments={"n": 2}))  # same request_id "r1"
+    assert first.ticket_id != second.ticket_id
+    assert (await tickets.get(first.ticket_id)).call.arguments == {"n": 1}
+
+
+async def test_ticket_keeps_the_reference_not_the_materialized_secret():
+    secrets = DictSecretResolver({"gh-token": "s3cr3t"})
+    gw, grants, _s, tickets, audit = build(secrets=secrets, echo=False)
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.INTERACTIVE))
+    task = asyncio.create_task(gw.call(a_call(arguments={"token": "secret://gh-token"})))
+    await asyncio.sleep(0.05)
+    ticket_id = gated_ticket(audit)
+    await tickets.decide(ticket_id, Decision(DecisionStatus.APPROVED, approver="alice"))
+    await task
+    assert (await tickets.get(ticket_id)).call.arguments == {"token": "secret://gh-token"}

@@ -12,19 +12,44 @@ held the agent's HTTP request open for up to five minutes. Here:
                      connection, survives a client disconnect.
 """
 
+import uuid
+
 from .domain import (
     ApprovalDenied,
     ApprovalMode,
     Decision,
+    GatewayError,
     PendingApproval,
+    ToolResult,
 )
 from .pipeline import CallContext, Next
 from .ports import TicketStore
 
 
-def _new_ticket_id(call) -> str:
-    # deterministic and readable: the request already carries a unique id
-    return f"tkt-{call.request_id}"
+def _new_ticket_id() -> str:
+    # never derived from the request: an MCP request id is the client's JSON-RPC
+    # counter, repeated across calls and agents
+    return f"tkt-{uuid.uuid4().hex}"
+
+
+async def run_once(tickets: TicketStore, ticket_id: str, run) -> ToolResult:
+    """Execute an approved ticket at most once and keep the outcome on it, so
+    a repeated check or resume returns the stored result instead of calling
+    the tool again. A failure is stored too: it is not retried behind the
+    operator's back."""
+    if not await tickets.claim(ticket_id):
+        ticket = await tickets.get(ticket_id)
+        if ticket is not None and ticket.result is not None:
+            return ticket.result
+        raise PendingApproval(ticket_id)  # another caller is executing it right now
+    try:
+        result = await run()
+    except GatewayError as exc:
+        result = ToolResult(content=str(exc), is_error=True)
+        await tickets.complete(ticket_id, result)
+        raise
+    await tickets.complete(ticket_id, result)
+    return result
 
 
 def apply_decision(ctx: CallContext, decision: Decision) -> None:
@@ -52,7 +77,7 @@ class ApprovalGate:
         if mode is ApprovalMode.AUTO:
             return await call_next(ctx)
 
-        ticket_id = _new_ticket_id(ctx.call)
+        ticket_id = _new_ticket_id()
         await self._tickets.create(ticket_id, ctx.call)
         await ctx.audit.record("gated", ctx.call, approval_mode=mode.value, ticket_id=ticket_id)
 
@@ -65,4 +90,4 @@ class ApprovalGate:
         decision = await self._tickets.await_decision(ticket_id, timeout_seconds=self._timeout)
         await ctx.audit.record("decided", ctx.call, status=decision.status.value, approver=decision.approver)
         apply_decision(ctx, decision)
-        return await call_next(ctx)
+        return await run_once(self._tickets, ticket_id, lambda: call_next(ctx))

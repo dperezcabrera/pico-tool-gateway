@@ -5,6 +5,7 @@ fleet swaps them for a vault, an MCP transport and a DB one at a time.
 """
 
 import asyncio
+import copy
 
 from ..domain import (
     Decision,
@@ -12,6 +13,7 @@ from ..domain import (
     Grant,
     SecretLeak,
     SecretRefMissing,
+    Ticket,
     ToolCall,
     ToolResult,
 )
@@ -106,34 +108,43 @@ class EchoUpstream:
 
 
 class MemoryTicketStore:
-    """Durable-enough for tests: a dict plus an event per pending ticket so
-    interactive mode can block until :meth:`decide` fires."""
+    """Single process, lost on restart: a dict plus an event per pending
+    ticket so interactive mode can block until :meth:`decide` fires."""
 
     def __init__(self):
-        self._calls: dict[str, ToolCall] = {}
-        self._decisions: dict[str, Decision] = {}
+        self._tickets: dict[str, Ticket] = {}
+        self._claimed: set[str] = set()
         self._events: dict[str, asyncio.Event] = {}
 
     async def create(self, ticket_id: str, call: ToolCall) -> None:
-        self._calls[ticket_id] = call
-        self._decisions[ticket_id] = Decision(status=DecisionStatus.PENDING)
+        self._tickets[ticket_id] = Ticket(copy.deepcopy(call), Decision(status=DecisionStatus.PENDING))
         self._events[ticket_id] = asyncio.Event()
 
-    async def get(self, ticket_id: str):
-        if ticket_id not in self._calls:
-            return None
-        return self._calls[ticket_id], self._decisions[ticket_id]
+    async def get(self, ticket_id: str) -> Ticket | None:
+        ticket = self._tickets.get(ticket_id)
+        return copy.deepcopy(ticket) if ticket else None
 
     async def decide(self, ticket_id: str, decision: Decision) -> None:
-        self._decisions[ticket_id] = decision
+        if ticket_id in self._tickets:
+            self._tickets[ticket_id].decision = decision
         self._events.setdefault(ticket_id, asyncio.Event()).set()
+
+    async def claim(self, ticket_id: str) -> bool:
+        ticket = self._tickets.get(ticket_id)
+        if ticket is None or ticket.result is not None or ticket_id in self._claimed:
+            return False
+        self._claimed.add(ticket_id)
+        return True
+
+    async def complete(self, ticket_id: str, result: ToolResult) -> None:
+        self._tickets[ticket_id].result = copy.deepcopy(result)
 
     async def await_decision(self, ticket_id: str, *, timeout_seconds: float) -> Decision:
         try:
             await asyncio.wait_for(self._events[ticket_id].wait(), timeout=timeout_seconds)
         except TimeoutError:
             return Decision(status=DecisionStatus.TIMEOUT)
-        return self._decisions[ticket_id]
+        return self._tickets[ticket_id].decision
 
 
 class DictToolCatalog:

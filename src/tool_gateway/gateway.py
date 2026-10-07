@@ -12,7 +12,7 @@ validation, secret materialization or redaction.
 
 from dataclasses import dataclass
 
-from .approval import ApprovalGate, apply_decision
+from .approval import ApprovalGate, apply_decision, run_once
 from .domain import DecisionStatus, PendingApproval, ToolCall, ToolNotAllowed, ToolResult
 from .pipeline import CallContext, Pipeline, Step, audited
 from .ports import (
@@ -75,10 +75,12 @@ class ToolGateway:
             return Pending(pending.ticket_id)
 
     async def resume(self, ticket_id: str) -> ToolResult:
-        loaded = await self._tickets.get(ticket_id)
-        if loaded is None:
+        ticket = await self._tickets.get(ticket_id)
+        if ticket is None:
             raise UnknownTicket(ticket_id)
-        call, decision = loaded
+        if ticket.result is not None:
+            return ticket.result  # already executed: never twice
+        call, decision = ticket.call, ticket.decision
         if decision.status is DecisionStatus.PENDING:
             raise PendingApproval(ticket_id)
         # re-resolve the grant so schema/mode reflect current policy, not a
@@ -89,4 +91,4 @@ class ToolGateway:
         ctx = CallContext(call=call, audit=self._audit, grant=grant)
         apply_decision(ctx, decision)
         await self._audit.record("resumed", call, status=decision.status.value, approver=decision.approver)
-        return await self._post_approval.run(ctx)
+        return await run_once(self._tickets, ticket_id, lambda: self._post_approval.run(ctx))

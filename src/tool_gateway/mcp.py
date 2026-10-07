@@ -15,7 +15,7 @@ from typing import Any
 from pico_client_auth import SecurityContext
 from pico_fastapi import controller, post
 
-from .domain import ApprovalDenied, DecisionStatus, GatewayError, ToolCall
+from .domain import ApprovalDenied, DecisionStatus, GatewayError, PendingApproval, ToolCall
 from .gateway import Pending, ToolGateway, UnknownTicket
 from .ports import TicketStore, ToolCatalog
 
@@ -109,16 +109,18 @@ class McpController:
 
     async def _check(self, rid, agent_id: str, arguments: dict):
         ticket_id = arguments.get("ticket_id", "")
-        loaded = await self._tickets.get(ticket_id)
-        if loaded is None:
+        ticket = await self._tickets.get(ticket_id)
+        if ticket is None:
             return _error(rid, -32004, f"no such ticket: {ticket_id}")
-        call, decision = loaded
+        call, decision = ticket.call, ticket.decision
         if call.agent_id != agent_id:  # an agent can only check its own tickets
             return _error(rid, -32004, f"no such ticket: {ticket_id}")
         if decision.status is DecisionStatus.PENDING:
             return _result(rid, _pending(ticket_id))
         try:
             result = await self._gw.resume(ticket_id)
+        except PendingApproval:  # approved, and another check is executing it right now
+            return _result(rid, _pending(ticket_id))
         except ApprovalDenied as exc:
             return _result(
                 rid, _text_result(f"Approval denied: {exc}", is_error=True, meta={"status": decision.status.value})

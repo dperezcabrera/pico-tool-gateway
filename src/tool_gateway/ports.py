@@ -6,7 +6,7 @@ pipeline depend only on these — never on a vault, a DB or an MCP transport.
 
 from typing import Any, Protocol, runtime_checkable
 
-from .domain import Decision, Grant, ToolCall, ToolResult
+from .domain import Decision, Grant, Ticket, ToolCall, ToolResult
 
 
 @runtime_checkable
@@ -48,16 +48,26 @@ class Upstream(Protocol):
 
 @runtime_checkable
 class TicketStore(Protocol):
-    """Durable home for pending approvals. ``await_decision`` is how the
-    interactive mode blocks; the async mode never calls it."""
+    """Durable home for gated calls. ``await_decision`` is how the
+    interactive mode blocks; the async mode never calls it.
+
+    ``create`` keeps a snapshot of the call: later changes to the object (the
+    pipeline materializes secrets in place) must not reach the ticket.
+    ``claim`` is the run-once guard: it returns True for exactly one caller,
+    and only while the ticket has no result; ``complete`` stores that result.
+    """
 
     async def create(self, ticket_id: str, call: ToolCall) -> None: ...
 
-    async def get(self, ticket_id: str) -> tuple[ToolCall, Decision] | None: ...
+    async def get(self, ticket_id: str) -> Ticket | None: ...
 
     async def decide(self, ticket_id: str, decision: Decision) -> None: ...
 
     async def await_decision(self, ticket_id: str, *, timeout_seconds: float) -> Decision: ...
+
+    async def claim(self, ticket_id: str) -> bool: ...
+
+    async def complete(self, ticket_id: str, result: ToolResult) -> None: ...
 
 
 @runtime_checkable
