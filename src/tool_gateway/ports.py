@@ -10,7 +10,7 @@ pipeline depend only on these — never on a vault, a DB or an MCP transport.
 
 from typing import Any, Protocol, runtime_checkable
 
-from .domain import Decision, Grant, Ticket, ToolCall, ToolResult
+from .domain import ApprovalMode, Decision, Grant, Ticket, ToolCall, ToolResult
 
 
 @runtime_checkable
@@ -73,6 +73,10 @@ class TicketStore(Protocol):
 
     async def complete(self, ticket_id: str, result: ToolResult) -> None: ...
 
+    async def pending(self) -> dict[str, Ticket]:
+        """Tickets still waiting for a decision, oldest first: the operator's queue."""
+        ...
+
 
 @runtime_checkable
 class AuditLog(Protocol):
@@ -88,3 +92,12 @@ class ToolCatalog(Protocol):
     (``{"name", "description", "inputSchema"}``). Backs ``tools/list``."""
 
     async def tools_for(self, agent_id: str) -> list[dict[str, Any]]: ...
+
+
+@runtime_checkable
+class ApproverNotifier(Protocol):
+    """Tell the humans that a call waits for them. Called right after the
+    ticket exists; must return quickly (deliver in the background) and the
+    ticket stands whether or not the message gets through."""
+
+    async def notify_approvers(self, ticket_id: str, call: ToolCall, mode: ApprovalMode) -> None: ...

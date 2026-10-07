@@ -23,7 +23,7 @@ from .domain import (
     ToolResult,
 )
 from .pipeline import CallContext, Next
-from .ports import TicketStore
+from .ports import ApproverNotifier, TicketStore
 
 
 def _new_ticket_id() -> str:
@@ -68,9 +68,10 @@ def apply_decision(ctx: CallContext, decision: Decision) -> None:
 
 
 class ApprovalGate:
-    def __init__(self, tickets: TicketStore, *, timeout_seconds: float = 300):
+    def __init__(self, tickets: TicketStore, *, timeout_seconds: float = 300, notifier: ApproverNotifier | None = None):
         self._tickets = tickets
         self._timeout = timeout_seconds
+        self._notifier = notifier
 
     async def __call__(self, ctx: CallContext, call_next: Next):
         mode = ctx.grant.approval_mode if ctx.grant else ApprovalMode.AUTO
@@ -80,6 +81,12 @@ class ApprovalGate:
         ticket_id = _new_ticket_id()
         await self._tickets.create(ticket_id, ctx.call)
         await ctx.audit.audit_event("gated", ctx.call, approval_mode=mode.value, ticket_id=ticket_id)
+        if self._notifier is not None:
+            try:
+                await self._notifier.notify_approvers(ticket_id, ctx.call, mode)
+            except Exception as exc:  # noqa: BLE001
+                # the ticket exists and is listed for operators; a broken channel must not lose the call
+                await ctx.audit.audit_event("notify.error", ctx.call, ticket_id=ticket_id, error=str(exc))
 
         # async always hands back a ticket; interactive blocks only if the
         # caller can wait. A non-blocking caller (MCP) gets a ticket for

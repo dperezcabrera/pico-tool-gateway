@@ -188,3 +188,28 @@ def test_call_carries_the_catalog_annotations_to_the_policy(harness):
     agent = token(container, "agent-1@test", "agent")
     client.post("/mcp", json=rpc("tools/call", name="github.create_pr", arguments={}), headers=agent)
     assert container.get(_AllowAll).last.annotations == {"readOnlyHint": False, "destructiveHint": False}
+
+
+def test_operator_lists_the_pending_queue(harness):
+    client, container = harness
+    agent = token(container, "agent-1@test", "agent")
+    operator = token(container, "admin@gw.local", "operator")
+    container.get(_AllowAll).mode = ApprovalMode.ASYNC
+    called = client.post(
+        "/mcp", json=rpc("tools/call", name="github.create_pr", arguments={"title": "q"}), headers=agent
+    ).json()
+    ticket = called["result"]["_meta"]["ticket_id"]
+
+    assert client.get("/api/v1/tickets", headers=agent).status_code == 403
+    queue = client.get("/api/v1/tickets", headers=operator).json()
+    assert queue == [
+        {
+            "ticket_id": ticket,
+            "agent_id": "agent-1@test",
+            "tool": "github.create_pr",
+            "arguments": {"title": "q"},
+            "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        }
+    ]
+    client.post(f"/api/v1/tickets/{ticket}/decide", json={"status": "rejected"}, headers=operator)
+    assert client.get("/api/v1/tickets", headers=operator).json() == []

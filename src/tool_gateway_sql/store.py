@@ -106,6 +106,17 @@ class SqlTicketStore:
             )
             return won.rowcount == 1
 
+    async def pending(self) -> dict[str, Ticket]:
+        async with self._sessions.transaction(read_only=True) as session:
+            rows = (
+                await session.execute(
+                    select(TicketRow)
+                    .where(TicketRow.status == DecisionStatus.PENDING.value)
+                    .order_by(TicketRow.created_at)
+                )
+            ).scalars()
+            return {row.id: Ticket(call=ToolCall(**row.call), decision=_decision(row.decision)) for row in rows}
+
     async def complete(self, ticket_id: str, result: ToolResult) -> None:
         async with self._sessions.transaction() as session:
             await session.execute(

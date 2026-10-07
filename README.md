@@ -52,6 +52,7 @@ A gated tool does NOT block the agent. `tools/call` returns a **pending** result
 | Endpoint | Auth |
 |---|---|
 | `POST /mcp` (`tools/list`, `tools/call`) | valid agent token; identity from `sub` |
+| `GET /api/v1/tickets` | `operator` role: the pending queue, oldest first |
 | `POST /api/v1/tickets/{id}/decide` | `operator` role |
 | `POST /api/v1/tickets/{id}/resume` | `operator` role |
 
@@ -106,6 +107,26 @@ Rules match on `tool` (glob), `agent` (glob or list), `when` conditions over cal
 The keys are the four MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), read as the spec does: a missing hint takes its default (destructive and open-world unless declared otherwise), and a read-only tool is never destructive. The MCP edge copies each tool's annotations from the `ToolCatalog` into the call. Servers built with [pico-mcp](https://github.com/dperezcabrera/pico-mcp) declare them with `@tool(read_only=True)` / `@tool(destructive=True)`. Annotations are claims of the upstream: rely on them only for upstreams you vetted, and keep name-based rules first for the ones you do not.
 
 An operator hot-reloads it with `POST /api/v1/policy/reload` (push a body or re-read the file) — no restart. The `DeclarativePolicy` is the default `GrantResolver`; the port stays open, so a Rego/Cedar or remote-PDP adapter drops in when you outgrow declarative rules — this is the Policy Enforcement Point, the decision engine is pluggable.
+
+## Notifying approvers
+
+Every gated call can be pushed to a webhook (Slack, a chat bridge, an operator UI):
+
+```yaml
+tool_gateway:
+  notify_url: https://approvals.example/hook
+  notify_secret: change-me   # signs the body: X-Pico-Signature: sha256=<hex hmac>
+```
+
+The gateway POSTs one JSON event per ticket:
+
+```json
+{"event": "approval_requested", "ticket_id": "tkt-...", "approval_mode": "async",
+ "agent_id": "agent-1", "tool": "bank.wire", "arguments": {"cents": 5, "key": "secret://key"},
+ "annotations": {"destructiveHint": true}}
+```
+
+Arguments go as the agent sent them: `secret://` references, never the materialized values. Delivery runs in the background, so the agent gets its pending result at once. Network errors and 5xx are retried three times with exponential backoff; a 4xx is final. Both outcomes are audited (`notified`, `notify.error`). The message is a nudge, not the record: a ticket exists whether or not it got through, and `GET /api/v1/tickets` always shows the queue. Deliveries still in flight when the process stops are lost; the tickets are not. Another channel plugs in through the `ApproverNotifier` port.
 
 ## Persistence
 

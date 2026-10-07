@@ -111,3 +111,13 @@ async def test_audit_events_are_rows(boot):
 
 async def test_unknown_ticket_is_none(boot):
     assert await boot().get(TicketStore).get("tkt-nope") is None
+
+
+async def test_pending_queue_is_oldest_first_and_drops_decided(boot):
+    container = boot()
+    gw, store = container.get(ToolGateway), container.get(TicketStore)
+    first = await gw.call(a_call(n=1))
+    second = await gw.call(a_call(n=2))
+    assert list(await store.pending()) == [first.ticket_id, second.ticket_id]
+    await store.decide(first.ticket_id, Decision(DecisionStatus.REJECTED, approver="ops"))
+    assert list(await store.pending()) == [second.ticket_id]

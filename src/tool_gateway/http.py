@@ -6,7 +6,7 @@ never reach these; humans (or an operator UI) do.
 
 from fastapi import HTTPException
 from pico_client_auth import requires_role
-from pico_fastapi import controller, post
+from pico_fastapi import controller, get, post
 
 from .domain import Decision, DecisionStatus, GatewayError
 from .gateway import ToolGateway, UnknownTicket
@@ -19,6 +19,21 @@ class TicketController:
     def __init__(self, gateway: ToolGateway, tickets: TicketStore):
         self._gw = gateway
         self._tickets = tickets
+
+    @requires_role("operator")
+    @get("")
+    async def pending(self):
+        """The approval queue, oldest first: what a lost notification can still be found in."""
+        return [
+            {
+                "ticket_id": ticket_id,
+                "agent_id": t.call.agent_id,
+                "tool": t.call.full_name,
+                "arguments": t.call.arguments,
+                "annotations": t.call.annotations,
+            }
+            for ticket_id, t in (await self._tickets.pending()).items()
+        ]
 
     @requires_role("operator")
     @post("/{ticket_id}/decide")

@@ -16,6 +16,7 @@ from .approval import ApprovalGate, apply_decision, run_once
 from .domain import DecisionStatus, PendingApproval, ToolCall, ToolNotAllowed, ToolResult
 from .pipeline import CallContext, Pipeline, Step, audited
 from .ports import (
+    ApproverNotifier,
     AuditLog,
     GrantResolver,
     SchemaValidator,
@@ -48,12 +49,15 @@ class ToolGateway:
         tickets: TicketStore,
         audit: AuditLog,
         approval_timeout_seconds: float = 300,
+        notifier: ApproverNotifier | None = None,
     ):
         self._tickets = tickets
         self._audit = audit
         self._grants = grants
         authorize: Step = audited(Authorize(grants), "authorize")
-        gate: Step = audited(ApprovalGate(tickets, timeout_seconds=approval_timeout_seconds), "approval")
+        gate: Step = audited(
+            ApprovalGate(tickets, timeout_seconds=approval_timeout_seconds, notifier=notifier), "approval"
+        )
         validate: Step = audited(ValidateSchema(validator), "validate")
         materialize: Step = audited(MaterializeSecrets(secrets), "materialize")
         redact: Step = Redact(secrets)

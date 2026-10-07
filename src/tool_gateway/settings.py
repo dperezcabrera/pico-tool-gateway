@@ -18,3 +18,7 @@ class ToolGatewaySettings:
     upstreams: dict[str, str] = field(default_factory=dict)
     # how long a tools/list of the upstreams is reused before asking them again
     catalog_ttl_seconds: float = 30.0
+    # webhook told about every gated call (empty: no notification); with a
+    # secret the body is signed in X-Pico-Signature (HMAC-SHA256)
+    notify_url: str = ""
+    notify_secret: str = ""

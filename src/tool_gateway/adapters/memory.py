@@ -136,6 +136,11 @@ class MemoryTicketStore:
         self._claimed.add(ticket_id)
         return True
 
+    async def pending(self) -> dict[str, Ticket]:
+        return {
+            tid: copy.deepcopy(t) for tid, t in self._tickets.items() if t.decision.status is DecisionStatus.PENDING
+        }
+
     async def complete(self, ticket_id: str, result: ToolResult) -> None:
         self._tickets[ticket_id].result = copy.deepcopy(result)
 

@@ -20,9 +20,11 @@ from .adapters.memory import (
     MemoryTicketStore,
     MiniSchemaValidator,
 )
+from .adapters.webhook import WebhookNotifier
 from .gateway import ToolGateway
 from .policy import DeclarativePolicy
 from .ports import (
+    ApproverNotifier,
     AuditLog,
     GrantResolver,
     SchemaValidator,
@@ -83,6 +85,16 @@ class _McpCatalog(McpUpstreams):
         super().__init__(settings.upstreams, ttl_seconds=settings.catalog_ttl_seconds)
 
 
+@component(on_missing_selector=ApproverNotifier)
+class _DefaultNotifier(WebhookNotifier):
+    """Signed webhook to ``tool_gateway.notify_url``; silent when unset."""
+
+    # ponytail: deliveries in flight at shutdown are lost; the ticket stays listed for operators
+
+    def __init__(self, settings: ToolGatewaySettings, audit: AuditLog):
+        super().__init__(settings.notify_url, audit, secret=settings.notify_secret)
+
+
 @factory
 class ToolGatewayFactory:
     """Assembles the pure ToolGateway from injected ports. The core stays
@@ -98,6 +110,7 @@ class ToolGatewayFactory:
         upstream: Upstream,
         tickets: TicketStore,
         audit: AuditLog,
+        notifier: ApproverNotifier,
     ) -> ToolGateway:
         return ToolGateway(
             grants=grants,
@@ -107,4 +120,5 @@ class ToolGatewayFactory:
             tickets=tickets,
             audit=audit,
             approval_timeout_seconds=settings.approval_timeout_seconds,
+            notifier=notifier,
         )
