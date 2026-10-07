@@ -73,7 +73,7 @@ async def test_interactive_blocks_then_approves():
     task = asyncio.create_task(gw.call(a_call(arguments={"title": "ship"})))
     await asyncio.sleep(0.05)  # let it reach the gate and block
     assert not task.done()
-    await tickets.decide(gated_ticket(audit), Decision(DecisionStatus.APPROVED, approver="alice"))
+    await gw.decide(gated_ticket(audit), Decision(DecisionStatus.APPROVED, approver="alice"))
     result = await task
     assert result.content["echo"] == {"title": "ship"}
     assert "approval" not in "".join(audit.actions())  # no error event
@@ -85,7 +85,7 @@ async def test_interactive_rejected_raises():
     grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.INTERACTIVE))
     task = asyncio.create_task(gw.call(a_call()))
     await asyncio.sleep(0.05)
-    await tickets.decide(gated_ticket(audit), Decision(DecisionStatus.REJECTED, approver="bob", reason="nope"))
+    await gw.decide(gated_ticket(audit), Decision(DecisionStatus.REJECTED, approver="bob", reason="nope"))
     with pytest.raises(ApprovalDenied):
         await task
 
@@ -114,7 +114,7 @@ async def test_interactive_edit_is_applied_and_noted():
     grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.INTERACTIVE))
     task = asyncio.create_task(gw.call(a_call(arguments={"title": "typo"})))
     await asyncio.sleep(0.05)
-    await tickets.decide(
+    await gw.decide(
         gated_ticket(audit), Decision(DecisionStatus.APPROVED, approver="alice", edited_arguments={"title": "fixed"})
     )
     result = await task
@@ -206,7 +206,7 @@ async def test_interactive_ticket_is_not_executed_again_by_resume():
     task = asyncio.create_task(gw.call(a_call(arguments={"title": "x"})))
     await asyncio.sleep(0.05)
     ticket_id = gated_ticket(audit)
-    await tickets.decide(ticket_id, Decision(DecisionStatus.APPROVED, approver="alice"))
+    await gw.decide(ticket_id, Decision(DecisionStatus.APPROVED, approver="alice"))
     await task
     await gw.resume(ticket_id)
     assert len(gw._test_upstream.received) == 1
@@ -228,7 +228,7 @@ async def test_ticket_keeps_the_reference_not_the_materialized_secret():
     task = asyncio.create_task(gw.call(a_call(arguments={"token": "secret://gh-token"})))
     await asyncio.sleep(0.05)
     ticket_id = gated_ticket(audit)
-    await tickets.decide(ticket_id, Decision(DecisionStatus.APPROVED, approver="alice"))
+    await gw.decide(ticket_id, Decision(DecisionStatus.APPROVED, approver="alice"))
     await task
     assert (await tickets.get(ticket_id)).call.arguments == {"token": "secret://gh-token"}
 
@@ -256,21 +256,42 @@ async def test_interactive_timeout_is_recorded_so_a_late_approval_cannot_run_it(
 
 async def test_a_verdict_right_at_the_deadline_stands():
     class LastSecond(MemoryTicketStore):
-        async def await_decision(self, ticket_id, *, timeout_seconds):
-            await self.decide(ticket_id, Decision(DecisionStatus.APPROVED, approver="alice"))
-            return Decision(status=DecisionStatus.TIMEOUT)  # the waiter gave up at the same instant
+        async def decide(self, ticket_id, decision):
+            if decision.status is DecisionStatus.TIMEOUT:
+                # the operator's approval lands just before the waiter records its timeout
+                await super().decide(ticket_id, Decision(DecisionStatus.APPROVED, approver="alice"))
+            return await super().decide(ticket_id, decision)
 
-    gw, grants, *_ = build()
-    store = LastSecond()
+    grants = DictGrantResolver()
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.INTERACTIVE))
+    upstream = EchoUpstream()
     gw = ToolGateway(
         grants=grants,
         validator=MiniSchemaValidator(),
         secrets=DictSecretResolver(),
-        upstream=gw._test_upstream,
-        tickets=store,
+        upstream=upstream,
+        tickets=LastSecond(),
         audit=ListAuditLog(),
-        approval_timeout_seconds=1,
+        approval_timeout_seconds=0.1,
     )
-    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.INTERACTIVE))
     result = await gw.call(a_call(arguments={"title": "just in time"}))
     assert result.content["echo"] == {"title": "just in time"}
+
+
+async def test_the_signal_wakes_the_waiter_at_once():
+    gw, grants, _s, _t, audit = build()
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.INTERACTIVE))
+    task = asyncio.create_task(gw.call(a_call()))
+    await asyncio.sleep(0.05)
+    started = asyncio.get_running_loop().time()
+    await gw.decide(gated_ticket(audit), Decision(DecisionStatus.APPROVED, approver="alice"))
+    await task
+    assert asyncio.get_running_loop().time() - started < 0.5  # not the 5 s recheck, not the 1 s timeout
+
+
+async def test_a_signal_sent_before_the_wait_is_not_lost():
+    from tool_gateway.adapters.memory import MemoryDecisionSignal
+
+    signal = MemoryDecisionSignal()
+    await signal.signal_decision("tkt-1")
+    await asyncio.wait_for(signal.wait_for_decision("tkt-1", timeout_seconds=5), timeout=0.5)

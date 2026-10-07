@@ -181,7 +181,11 @@ database:
   url: sqlite+aiosqlite:///gateway.db   # or postgresql+asyncpg://... for several replicas
 ```
 
-`tool_gateway_sql` replaces the `TicketStore` and `AuditLog` defaults with pico-sqlalchemy tables (`tool_gateway_tickets`, `tool_gateway_audit`) and creates them at startup if missing. A ticket survives a restart and is resumed by whichever process the operator reaches. The run-once claim is a conditional `UPDATE`, so it holds across replicas sharing the database, and an interactive wait polls the ticket row (every 0.5 s) so it also sees a decision recorded by another replica.
+`tool_gateway_sql` replaces the `TicketStore` and `AuditLog` defaults with pico-sqlalchemy tables (`tool_gateway_tickets`, `tool_gateway_audit`) and creates them at startup if missing. A ticket survives a restart and is resumed by whichever process the operator reaches. The run-once claim and the verdict are conditional `UPDATE`s, so they hold across replicas sharing the database.
+
+## Waiting for a decision
+
+An interactive call waits on a `DecisionSignal`, not on the database: `ToolGateway.decide` records the verdict and then signals, and the waiter rereads its ticket when woken. The store stays the source of truth, so the waiter also rereads it every `tool_gateway.decision_recheck_seconds` (5 s by default) whatever the signal does: a lost signal delays a waiter, it never misleads one. The default signal is in-process (instant on the replica that took the decision); register a `DecisionSignal` on Postgres `LISTEN/NOTIFY` or Redis pub/sub to wake waiters on every replica at once. With many callers, prefer `async` approval: nothing waits at all.
 
 ## Usage
 

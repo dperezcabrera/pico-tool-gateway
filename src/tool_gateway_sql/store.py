@@ -1,6 +1,5 @@
 import asyncio
 import dataclasses
-import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -42,10 +41,8 @@ def _decision(raw: dict) -> Decision:
 
 @component
 class SqlTicketStore:
-    """Tickets as rows. ``claim`` is a conditional UPDATE, so exactly one
-    caller wins even across replicas sharing the database."""
-
-    poll_seconds = 0.5  # interactive waits poll the row: a decision may come from another replica
+    """Tickets as rows. ``claim`` and ``decide`` are conditional UPDATEs, so
+    exactly one caller wins even across replicas sharing the database."""
 
     def __init__(self, sessions: SessionManager):
         self._sessions = sessions
@@ -86,17 +83,6 @@ class SqlTicketStore:
                 )
             )
             return decided.rowcount == 1
-
-    async def await_decision(self, ticket_id: str, *, timeout_seconds: float) -> Decision:
-        deadline = time.monotonic() + timeout_seconds
-        while True:
-            async with self._sessions.transaction(read_only=True) as session:
-                raw = (await session.execute(select(TicketRow.decision).where(TicketRow.id == ticket_id))).scalar()
-            if raw is not None and raw["status"] != DecisionStatus.PENDING.value:
-                return _decision(raw)
-            if time.monotonic() >= deadline:
-                return Decision(status=DecisionStatus.TIMEOUT)
-            await asyncio.sleep(min(self.poll_seconds, max(deadline - time.monotonic(), 0)))
 
     async def claim(self, ticket_id: str) -> bool:
         async with self._sessions.transaction() as session:

@@ -13,12 +13,14 @@ validation, secret materialization or redaction.
 from collections.abc import Sequence
 from dataclasses import dataclass
 
+from .adapters.memory import MemoryDecisionSignal
 from .approval import ApprovalGate, apply_decision, run_once
 from .domain import Decision, DecisionStatus, PendingApproval, ToolCall, ToolNotAllowed, ToolResult
 from .pipeline import CallContext, Pipeline, Stage, audited
 from .ports import (
     ApproverNotifier,
     AuditLog,
+    DecisionSignal,
     GatewayStep,
     GrantResolver,
     RateLimiter,
@@ -59,10 +61,13 @@ class ToolGateway:
         notifier: ApproverNotifier | None = None,
         rate_limiter: RateLimiter | None = None,
         steps: Sequence[GatewayStep] = (),
+        signal: DecisionSignal | None = None,
+        decision_recheck_seconds: float = 5.0,
     ):
         self._tickets = tickets
         self._audit = audit
         self._grants = grants
+        self._signal = signal or MemoryDecisionSignal()
         builtin = [
             audited(Authorize(grants), "authorize"),
             audited(ValidateSchema(validator), "validate"),
@@ -78,7 +83,16 @@ class ToolGateway:
         # sorted() is stable: at equal order a built-in runs before an extra step
         before = sorted((s for s in chain if s.stage is Stage.BEFORE_APPROVAL), key=lambda s: s.order)
         after = sorted((s for s in chain if s.stage is Stage.AFTER_APPROVAL), key=lambda s: s.order)
-        gate = audited(ApprovalGate(tickets, timeout_seconds=approval_timeout_seconds, notifier=notifier), "approval")
+        gate = audited(
+            ApprovalGate(
+                tickets,
+                self._signal,
+                timeout_seconds=approval_timeout_seconds,
+                recheck_seconds=decision_recheck_seconds,
+                notifier=notifier,
+            ),
+            "approval",
+        )
         dispatch = Dispatch(upstream)
 
         # after-approval steps follow the gate so an operator edit is validated too
@@ -106,6 +120,7 @@ class ToolGateway:
             raise UnknownTicket(ticket_id)
         if not await self._tickets.decide(ticket_id, decision):
             raise TicketAlreadyDecided(ticket_id)
+        await self._signal.signal_decision(ticket_id)
         await self._audit.audit_event(
             "decision",
             ticket.call,

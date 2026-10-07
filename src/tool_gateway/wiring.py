@@ -17,6 +17,7 @@ from .adapters.mcp_upstreams import McpUpstreams
 from .adapters.memory import (
     DictSecretResolver,
     ListAuditLog,
+    MemoryDecisionSignal,
     MemoryTicketStore,
     MiniSchemaValidator,
     WindowRateLimiter,
@@ -27,6 +28,7 @@ from .policy import DeclarativePolicy
 from .ports import (
     ApproverNotifier,
     AuditLog,
+    DecisionSignal,
     GatewayStep,
     GrantResolver,
     RateLimiter,
@@ -98,6 +100,11 @@ class _DefaultNotifier(WebhookNotifier):
         super().__init__(settings.notify_url, audit, secret=settings.notify_secret)
 
 
+@component(on_missing_selector=DecisionSignal)
+class _DefaultSignal(MemoryDecisionSignal):
+    """In-process wake-up; replicas fall back on the periodic recheck."""
+
+
 @component(on_missing_selector=RateLimiter)
 class _DefaultRateLimiter(WindowRateLimiter):
     """Per-process window from ``tool_gateway.rate_limit_per_minute`` (0: off)."""
@@ -124,6 +131,7 @@ class ToolGatewayFactory:
         notifier: ApproverNotifier,
         rate_limiter: RateLimiter,
         steps: list[GatewayStep],
+        signal: DecisionSignal,
     ) -> ToolGateway:
         return ToolGateway(
             grants=grants,
@@ -136,4 +144,6 @@ class ToolGatewayFactory:
             notifier=notifier,
             rate_limiter=rate_limiter,
             steps=steps,
+            signal=signal,
+            decision_recheck_seconds=settings.decision_recheck_seconds,
         )

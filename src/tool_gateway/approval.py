@@ -12,6 +12,7 @@ held the agent's HTTP request open for up to five minutes. Here:
                      connection, survives a client disconnect.
 """
 
+import time
 import uuid
 
 from .domain import (
@@ -24,7 +25,7 @@ from .domain import (
     ToolResult,
 )
 from .pipeline import CallContext, Next
-from .ports import ApproverNotifier, TicketStore
+from .ports import ApproverNotifier, DecisionSignal, TicketStore
 
 
 def _new_ticket_id() -> str:
@@ -69,10 +70,33 @@ def apply_decision(ctx: CallContext, decision: Decision) -> None:
 
 
 class ApprovalGate:
-    def __init__(self, tickets: TicketStore, *, timeout_seconds: float = 300, notifier: ApproverNotifier | None = None):
+    def __init__(
+        self,
+        tickets: TicketStore,
+        signal: DecisionSignal,
+        *,
+        timeout_seconds: float = 300,
+        recheck_seconds: float = 5.0,
+        notifier: ApproverNotifier | None = None,
+    ):
         self._tickets = tickets
+        self._signal = signal
         self._timeout = timeout_seconds
+        self._recheck = recheck_seconds
         self._notifier = notifier
+
+    async def _await_decision(self, ticket_id: str) -> Decision:
+        """Sleep on the signal, reread the ticket on every wake; the periodic
+        recheck covers a signal lost between replicas."""
+        deadline = time.monotonic() + self._timeout
+        while True:
+            decision = (await self._tickets.get(ticket_id)).decision
+            if decision.status is not DecisionStatus.PENDING:
+                return decision
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return Decision(status=DecisionStatus.TIMEOUT)
+            await self._signal.wait_for_decision(ticket_id, timeout_seconds=min(remaining, self._recheck))
 
     async def handle_call(self, ctx: CallContext, call_next: Next):
         mode = ctx.grant.approval_mode if ctx.grant else ApprovalMode.AUTO
@@ -95,7 +119,7 @@ class ApprovalGate:
         if mode is ApprovalMode.ASYNC or not ctx.can_block:
             raise PendingApproval(ticket_id)
 
-        decision = await self._tickets.await_decision(ticket_id, timeout_seconds=self._timeout)
+        decision = await self._await_decision(ticket_id)
         if decision.status is DecisionStatus.TIMEOUT and not await self._tickets.decide(ticket_id, decision):
             # an operator decided right at the deadline: their verdict stands
             decision = (await self._tickets.get(ticket_id)).decision

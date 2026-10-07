@@ -109,17 +109,14 @@ class EchoUpstream:
 
 
 class MemoryTicketStore:
-    """Single process, lost on restart: a dict plus an event per pending
-    ticket so interactive mode can block until :meth:`decide` fires."""
+    """Single process, lost on restart."""
 
     def __init__(self):
         self._tickets: dict[str, Ticket] = {}
         self._claimed: set[str] = set()
-        self._events: dict[str, asyncio.Event] = {}
 
     async def create(self, ticket_id: str, call: ToolCall) -> None:
         self._tickets[ticket_id] = Ticket(copy.deepcopy(call), Decision(status=DecisionStatus.PENDING))
-        self._events[ticket_id] = asyncio.Event()
 
     async def get(self, ticket_id: str) -> Ticket | None:
         ticket = self._tickets.get(ticket_id)
@@ -130,7 +127,6 @@ class MemoryTicketStore:
         if ticket is None or ticket.decision.status is not DecisionStatus.PENDING:
             return False
         ticket.decision = copy.deepcopy(decision)
-        self._events[ticket_id].set()
         return True
 
     async def claim(self, ticket_id: str) -> bool:
@@ -148,12 +144,24 @@ class MemoryTicketStore:
     async def complete(self, ticket_id: str, result: ToolResult) -> None:
         self._tickets[ticket_id].result = copy.deepcopy(result)
 
-    async def await_decision(self, ticket_id: str, *, timeout_seconds: float) -> Decision:
+
+class MemoryDecisionSignal:
+    """In-process wake-up. Race-free here: a signal sent before anyone waits
+    is kept, so the wait returns at once. Other replicas never hear it."""
+
+    def __init__(self):
+        self._events: dict[str, asyncio.Event] = {}
+
+    async def wait_for_decision(self, ticket_id: str, *, timeout_seconds: float) -> None:
+        event = self._events.setdefault(ticket_id, asyncio.Event())
         try:
-            await asyncio.wait_for(self._events[ticket_id].wait(), timeout=timeout_seconds)
+            await asyncio.wait_for(event.wait(), timeout=timeout_seconds)
         except TimeoutError:
-            return Decision(status=DecisionStatus.TIMEOUT)
-        return self._tickets[ticket_id].decision
+            return
+        self._events.pop(ticket_id, None)
+
+    async def signal_decision(self, ticket_id: str) -> None:
+        self._events.setdefault(ticket_id, asyncio.Event()).set()
 
 
 class DictToolCatalog:

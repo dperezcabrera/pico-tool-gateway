@@ -52,8 +52,8 @@ class Upstream(Protocol):
 
 @runtime_checkable
 class TicketStore(Protocol):
-    """Durable home for gated calls. ``await_decision`` is how the
-    interactive mode blocks; the async mode never calls it.
+    """Durable home for gated calls: state only. Waking a waiter when a
+    verdict lands is the DecisionSignal's job.
 
     ``create`` keeps a snapshot of the call: later changes to the object (the
     pipeline materializes secrets in place) must not reach the ticket.
@@ -69,8 +69,6 @@ class TicketStore(Protocol):
         """Record the verdict only while the ticket is pending: a verdict is
         final. False when the ticket is unknown or already decided."""
         ...
-
-    async def await_decision(self, ticket_id: str, *, timeout_seconds: float) -> Decision: ...
 
     async def claim(self, ticket_id: str) -> bool: ...
 
@@ -129,3 +127,18 @@ class GatewayStep(Protocol):
     order: int
 
     async def handle_call(self, ctx: Any, call_next: Any) -> ToolResult: ...
+
+
+@runtime_checkable
+class DecisionSignal(Protocol):
+    """Wake an interactive waiter when its ticket is decided, without polling
+    the ticket store. The store stays the source of truth: the gate rereads
+    the ticket after every wake and rechecks it periodically, so a lost signal
+    only delays a waiter, never misleads it. Back it with Postgres
+    LISTEN/NOTIFY or Redis pub/sub when the decision may land on another replica."""
+
+    async def wait_for_decision(self, ticket_id: str, *, timeout_seconds: float) -> None:
+        """Return when signalled (or already signalled) or after the timeout."""
+        ...
+
+    async def signal_decision(self, ticket_id: str) -> None: ...

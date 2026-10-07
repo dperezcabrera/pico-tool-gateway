@@ -35,13 +35,13 @@ class _Policy:
 def boot(make_container, tmp_path):
     url = f"sqlite+aiosqlite:///{tmp_path / 'gateway.db'}"
 
-    def _boot():
+    def _boot(**gateway):
         return make_container(
             "tool_gateway",
             "tool_gateway_sql",
             "pico_sqlalchemy",
             sys.modules[__name__],
-            config={"database": {"url": url}},
+            config={"database": {"url": url}, "tool_gateway": gateway},
         )
 
     _Policy.mode = ApprovalMode.ASYNC
@@ -85,9 +85,10 @@ async def test_claim_is_won_once_across_replicas(boot):
     assert sorted(wins) == [False, True]
 
 
-async def test_interactive_wait_sees_a_decision_from_another_replica(boot):
+async def test_a_decision_on_another_replica_is_seen_by_the_periodic_recheck(boot):
+    # b's signal is in-process, so a never hears it: the recheck must pick the verdict up
     _Policy.mode = ApprovalMode.INTERACTIVE
-    a, b = boot(), boot()
+    a, b = boot(decision_recheck_seconds=0.1), boot()
     task = asyncio.create_task(a.get(ToolGateway).call(a_call(title="x")))
     for _ in range(50):
         await asyncio.sleep(0.05)
@@ -95,8 +96,8 @@ async def test_interactive_wait_sees_a_decision_from_another_replica(boot):
             gated = (await session.execute(select(AuditRow).where(AuditRow.event == "gated"))).scalars().first()
         if gated:
             break
-    await b.get(TicketStore).decide(gated.fields["ticket_id"], Decision(DecisionStatus.APPROVED, approver="ops"))
-    result = await asyncio.wait_for(task, timeout=5)
+    await b.get(ToolGateway).decide(gated.fields["ticket_id"], Decision(DecisionStatus.APPROVED, approver="ops"))
+    result = await asyncio.wait_for(task, timeout=1)
     assert result.content["echo"] == {"title": "x"}
 
 

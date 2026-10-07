@@ -9,6 +9,9 @@ from pico_ioc import configured
 @dataclass
 class ToolGatewaySettings:
     approval_timeout_seconds: float = 300.0
+    # an interactive waiter rereads its ticket at least this often, in case a
+    # decision signal was lost (e.g. the verdict landed on another replica)
+    decision_recheck_seconds: float = 5.0
     # path to a JSON policy file {"default": "deny", "rules": [...]}; the
     # plug-and-play artifact — edit it and POST /api/v1/policy/reload. Empty
     # means deny-all.
