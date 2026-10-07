@@ -5,11 +5,11 @@ never reach these; humans (or an operator UI) do.
 """
 
 from fastapi import HTTPException
-from pico_client_auth import requires_role
+from pico_client_auth import SecurityContext, requires_role
 from pico_fastapi import controller, get, post
 
 from .domain import Decision, DecisionStatus, GatewayError
-from .gateway import ToolGateway, UnknownTicket
+from .gateway import TicketAlreadyDecided, ToolGateway, UnknownTicket
 from .policy import PolicyError
 from .ports import GrantResolver, TicketStore
 
@@ -38,14 +38,21 @@ class TicketController:
     @requires_role("operator")
     @post("/{ticket_id}/decide")
     async def decide(self, ticket_id: str, body: dict):
-        decision = Decision(
-            status=DecisionStatus(body.get("status", "rejected")),
-            approver=body.get("approver", ""),
-            reason=body.get("reason", ""),
-            edited_arguments=body.get("edited_arguments"),
-        )
-        await self._tickets.decide(ticket_id, decision)
-        return {"status": decision.status.value}
+        try:
+            decision = Decision(
+                status=DecisionStatus(body.get("status", "")),
+                approver=SecurityContext.require().sub,  # the verified operator, never a field in the body
+                reason=body.get("reason", ""),
+                edited_arguments=body.get("edited_arguments"),
+            )
+            await self._gw.decide(ticket_id, decision)
+        except UnknownTicket as exc:
+            raise HTTPException(404, "no such ticket") from exc
+        except TicketAlreadyDecided as exc:
+            raise HTTPException(409, "ticket already decided") from exc
+        except ValueError as exc:
+            raise HTTPException(422, "status must be 'approved' or 'rejected'") from exc
+        return {"status": decision.status.value, "approver": decision.approver}
 
     @requires_role("operator")
     @post("/{ticket_id}/resume")

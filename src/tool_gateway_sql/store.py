@@ -75,16 +75,17 @@ class SqlTicketStore:
                 result=ToolResult(**row.result) if row.result is not None else None,
             )
 
-    async def decide(self, ticket_id: str, decision: Decision) -> None:
+    async def decide(self, ticket_id: str, decision: Decision) -> bool:
         async with self._sessions.transaction() as session:
-            await session.execute(
+            decided = await session.execute(
                 update(TicketRow)
-                .where(TicketRow.id == ticket_id)
+                .where(TicketRow.id == ticket_id, TicketRow.status == DecisionStatus.PENDING.value)
                 .values(
                     status=decision.status.value,
                     decision={**dataclasses.asdict(decision), "status": decision.status.value},
                 )
             )
+            return decided.rowcount == 1
 
     async def await_decision(self, ticket_id: str, *, timeout_seconds: float) -> Decision:
         deadline = time.monotonic() + timeout_seconds

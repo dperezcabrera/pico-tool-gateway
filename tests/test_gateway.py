@@ -21,7 +21,7 @@ from tool_gateway.adapters.memory import (
     MiniSchemaValidator,
 )
 from tool_gateway.domain import ApprovalDenied, PendingApproval, SchemaInvalid, SecretLeak, ToolNotAllowed, ToolResult
-from tool_gateway.gateway import Pending
+from tool_gateway.gateway import Pending, TicketAlreadyDecided
 
 
 def build(*, grants=None, secrets=None, leak=None, echo=True):
@@ -231,3 +231,46 @@ async def test_ticket_keeps_the_reference_not_the_materialized_secret():
     await tickets.decide(ticket_id, Decision(DecisionStatus.APPROVED, approver="alice"))
     await task
     assert (await tickets.get(ticket_id)).call.arguments == {"token": "secret://gh-token"}
+
+
+async def test_decisions_are_audited_with_the_operator():
+    gw, grants, _s, _t, audit = build()
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.ASYNC))
+    pending = await gw.call(a_call())
+    await gw.decide(pending.ticket_id, Decision(DecisionStatus.APPROVED, approver="carol", reason="ok"))
+    event = next(e for e in audit.events if e["event"] == "decision")
+    assert (event["approver"], event["status"], event["reason"]) == ("carol", "approved", "ok")
+
+
+async def test_interactive_timeout_is_recorded_so_a_late_approval_cannot_run_it():
+    gw, grants, _s, tickets, audit = build()
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.INTERACTIVE))
+    with pytest.raises(ApprovalDenied):
+        await gw.call(a_call())  # nobody decides within the 1s timeout
+    ticket_id = gated_ticket(audit)
+    assert (await tickets.get(ticket_id)).decision.status is DecisionStatus.TIMEOUT
+    with pytest.raises(TicketAlreadyDecided):
+        await gw.decide(ticket_id, Decision(DecisionStatus.APPROVED, approver="late"))
+    assert gw._test_upstream.received == []
+
+
+async def test_a_verdict_right_at_the_deadline_stands():
+    class LastSecond(MemoryTicketStore):
+        async def await_decision(self, ticket_id, *, timeout_seconds):
+            await self.decide(ticket_id, Decision(DecisionStatus.APPROVED, approver="alice"))
+            return Decision(status=DecisionStatus.TIMEOUT)  # the waiter gave up at the same instant
+
+    gw, grants, *_ = build()
+    store = LastSecond()
+    gw = ToolGateway(
+        grants=grants,
+        validator=MiniSchemaValidator(),
+        secrets=DictSecretResolver(),
+        upstream=gw._test_upstream,
+        tickets=store,
+        audit=ListAuditLog(),
+        approval_timeout_seconds=1,
+    )
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.INTERACTIVE))
+    result = await gw.call(a_call(arguments={"title": "just in time"}))
+    assert result.content["echo"] == {"title": "just in time"}

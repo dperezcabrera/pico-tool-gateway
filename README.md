@@ -47,7 +47,7 @@ Installing the package brings pico-fastapi + pico-client-auth. There are two aut
 
 A gated tool does NOT block the agent. `tools/call` returns a **pending** result at once ("approval requested, ticket X — tell the user, then call `gateway.check`"), so the agent stays free: it informs the user and moves on. When it wants the outcome it polls the built-in `gateway.check` tool with the ticket_id — still pending, denied, or the real result once an operator decides. MCP stays synchronous on the wire; the approval is asynchronous for the agent. An agent can only check its own tickets.
 
-**Operator plane — REST, `operator` role.** Humans (or an operator UI) record decisions and resume tickets:
+**Operator plane — REST, `operator` role.** Humans (or an operator UI) record decisions and resume tickets. The approver recorded on a decision is the verified `sub` of the operator's token, never a field in the body. A verdict is final: deciding a ticket that is no longer pending answers 409, so a rejected call cannot be approved later, and an interactive call whose wait timed out is recorded as `timeout` and cannot be approved afterwards either. Every decision is audited (`decision`, with approver, status, reason and whether the arguments were edited).
 
 | Endpoint | Auth |
 |---|---|

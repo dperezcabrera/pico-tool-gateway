@@ -13,7 +13,7 @@ validation, secret materialization or redaction.
 from dataclasses import dataclass
 
 from .approval import ApprovalGate, apply_decision, run_once
-from .domain import DecisionStatus, PendingApproval, ToolCall, ToolNotAllowed, ToolResult
+from .domain import Decision, DecisionStatus, PendingApproval, ToolCall, ToolNotAllowed, ToolResult
 from .pipeline import CallContext, Pipeline, Step, audited
 from .ports import (
     ApproverNotifier,
@@ -36,6 +36,10 @@ class Pending:
 
 class UnknownTicket(Exception):
     pass
+
+
+class TicketAlreadyDecided(Exception):
+    """A verdict is final: a decided ticket cannot be decided again."""
 
 
 class ToolGateway:
@@ -77,6 +81,26 @@ class ToolGateway:
             return await self._full.run(ctx)
         except PendingApproval as pending:
             return Pending(pending.ticket_id)
+
+    async def decide(self, ticket_id: str, decision: Decision) -> None:
+        """Record an operator verdict on a pending ticket, once, and audit it.
+        ``decision.approver`` must be the verified operator, not a claim."""
+        if decision.status not in (DecisionStatus.APPROVED, DecisionStatus.REJECTED):
+            raise ValueError(f"an operator can approve or reject, not {decision.status.value!r}")
+        ticket = await self._tickets.get(ticket_id)
+        if ticket is None:
+            raise UnknownTicket(ticket_id)
+        if not await self._tickets.decide(ticket_id, decision):
+            raise TicketAlreadyDecided(ticket_id)
+        await self._audit.audit_event(
+            "decision",
+            ticket.call,
+            ticket_id=ticket_id,
+            status=decision.status.value,
+            approver=decision.approver,
+            reason=decision.reason,
+            edited=decision.edited_arguments is not None,
+        )
 
     async def resume(self, ticket_id: str) -> ToolResult:
         ticket = await self._tickets.get(ticket_id)

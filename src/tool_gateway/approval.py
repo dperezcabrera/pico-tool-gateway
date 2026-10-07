@@ -18,6 +18,7 @@ from .domain import (
     ApprovalDenied,
     ApprovalMode,
     Decision,
+    DecisionStatus,
     GatewayError,
     PendingApproval,
     ToolResult,
@@ -95,6 +96,9 @@ class ApprovalGate:
             raise PendingApproval(ticket_id)
 
         decision = await self._tickets.await_decision(ticket_id, timeout_seconds=self._timeout)
+        if decision.status is DecisionStatus.TIMEOUT and not await self._tickets.decide(ticket_id, decision):
+            # an operator decided right at the deadline: their verdict stands
+            decision = (await self._tickets.get(ticket_id)).decision
         await ctx.audit.audit_event("decided", ctx.call, status=decision.status.value, approver=decision.approver)
         apply_decision(ctx, decision)
         return await run_once(self._tickets, ticket_id, lambda: call_next(ctx))

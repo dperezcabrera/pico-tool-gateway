@@ -127,8 +127,8 @@ def test_operator_plane_needs_operator_role(harness):
 
     # an agent token cannot drive the operator plane
     assert client.post("/api/v1/tickets/tkt-x/decide", json={"status": "approved"}, headers=agent).status_code == 403
-    # an operator can (unknown ticket still records a decision, no-op)
-    assert client.post("/api/v1/tickets/tkt-x/decide", json={"status": "approved"}, headers=operator).status_code == 200
+    # an operator can; an unknown ticket is a 404, not a silent no-op
+    assert client.post("/api/v1/tickets/tkt-x/decide", json={"status": "approved"}, headers=operator).status_code == 404
 
 
 def test_gated_call_returns_pending_not_blocked(harness):
@@ -213,3 +213,48 @@ def test_operator_lists_the_pending_queue(harness):
     ]
     client.post(f"/api/v1/tickets/{ticket}/decide", json={"status": "rejected"}, headers=operator)
     assert client.get("/api/v1/tickets", headers=operator).json() == []
+
+
+def _gated(client, container, agent, **args) -> str:
+    container.get(_AllowAll).mode = ApprovalMode.ASYNC
+    called = client.post("/mcp", json=rpc("tools/call", name="github.create_pr", arguments=args), headers=agent).json()
+    return called["result"]["_meta"]["ticket_id"]
+
+
+def test_the_approver_is_the_verified_operator_not_the_body(harness):
+    client, container = harness
+    agent = token(container, "agent-1@test", "agent")
+    operator = token(container, "admin@gw.local", "operator")
+    ticket = _gated(client, container, agent)
+    decided = client.post(
+        f"/api/v1/tickets/{ticket}/decide", json={"status": "approved", "approver": "the-cfo"}, headers=operator
+    ).json()
+    assert decided["approver"] == "admin@gw.local"
+
+
+def test_a_verdict_is_final(harness):
+    client, container = harness
+    agent = token(container, "agent-1@test", "agent")
+    operator = token(container, "admin@gw.local", "operator")
+    ticket = _gated(client, container, agent, title="no")
+    assert (
+        client.post(f"/api/v1/tickets/{ticket}/decide", json={"status": "rejected"}, headers=operator).status_code
+        == 200
+    )
+    again = client.post(f"/api/v1/tickets/{ticket}/decide", json={"status": "approved"}, headers=operator)
+    assert again.status_code == 409
+    check = client.post(
+        "/mcp", json=rpc("tools/call", name="gateway.check", arguments={"ticket_id": ticket}), headers=agent
+    )
+    assert check.json()["result"]["isError"] is True  # still rejected, never executed
+    assert container.get(_Upstream).received == []
+
+
+def test_an_operator_can_only_approve_or_reject(harness):
+    client, container = harness
+    agent = token(container, "agent-1@test", "agent")
+    operator = token(container, "admin@gw.local", "operator")
+    ticket = _gated(client, container, agent)
+    for status in ("pending", "timeout", "", "maybe"):
+        r = client.post(f"/api/v1/tickets/{ticket}/decide", json={"status": status}, headers=operator)
+        assert r.status_code == 422, status

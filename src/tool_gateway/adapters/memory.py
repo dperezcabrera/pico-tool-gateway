@@ -124,10 +124,13 @@ class MemoryTicketStore:
         ticket = self._tickets.get(ticket_id)
         return copy.deepcopy(ticket) if ticket else None
 
-    async def decide(self, ticket_id: str, decision: Decision) -> None:
-        if ticket_id in self._tickets:
-            self._tickets[ticket_id].decision = decision
-        self._events.setdefault(ticket_id, asyncio.Event()).set()
+    async def decide(self, ticket_id: str, decision: Decision) -> bool:
+        ticket = self._tickets.get(ticket_id)
+        if ticket is None or ticket.decision.status is not DecisionStatus.PENDING:
+            return False
+        ticket.decision = copy.deepcopy(decision)
+        self._events[ticket_id].set()
+        return True
 
     async def claim(self, ticket_id: str) -> bool:
         ticket = self._tickets.get(ticket_id)

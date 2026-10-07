@@ -121,3 +121,15 @@ async def test_pending_queue_is_oldest_first_and_drops_decided(boot):
     assert list(await store.pending()) == [first.ticket_id, second.ticket_id]
     await store.decide(first.ticket_id, Decision(DecisionStatus.REJECTED, approver="ops"))
     assert list(await store.pending()) == [second.ticket_id]
+
+
+async def test_a_verdict_is_final_across_replicas(boot):
+    a, b = boot(), boot()
+    pending = await a.get(ToolGateway).call(a_call())
+    reject = Decision(DecisionStatus.REJECTED, approver="ops-a")
+    approve = Decision(DecisionStatus.APPROVED, approver="ops-b")
+    outcomes = await asyncio.gather(
+        a.get(TicketStore).decide(pending.ticket_id, reject), b.get(TicketStore).decide(pending.ticket_id, approve)
+    )
+    assert sorted(outcomes) == [False, True]
+    assert await a.get(TicketStore).decide(pending.ticket_id, approve) is False
