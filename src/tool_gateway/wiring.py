@@ -3,9 +3,9 @@ process with NO companion services.
 
 Every port has a safe in-process default registered with
 ``on_missing_selector`` — provide your own ``@component`` of the same
-protocol to override it. The only port WITHOUT a default is ``Upstream``:
-the real tool executor is yours to wire, and the container fails fast if
-it is missing rather than silently doing nothing.
+protocol to override it. ``Upstream`` and ``ToolCatalog`` default to the MCP
+servers listed in ``tool_gateway.upstreams``; with none configured a call
+fails naming the missing upstream rather than silently doing nothing.
 
 No broker, no worker, no external DB: async approval is a durable ticket
 plus an in-process ``resume()`` call, not a separate consumer.
@@ -13,14 +13,13 @@ plus an in-process ``resume()`` call, not a separate consumer.
 
 from pico_ioc import component, factory, provides
 
+from .adapters.mcp_upstreams import McpUpstreams
 from .adapters.memory import (
     DictSecretResolver,
-    DictToolCatalog,
     ListAuditLog,
     MemoryTicketStore,
     MiniSchemaValidator,
 )
-from .domain import ToolResult, UpstreamUnavailable
 from .gateway import ToolGateway
 from .policy import DeclarativePolicy
 from .ports import (
@@ -67,18 +66,21 @@ class _DefaultAudit(ListAuditLog):
     """In-memory audit; register a persistent AuditLog for retention."""
 
 
-@component(on_missing_selector=ToolCatalog)
-class _DefaultCatalog(DictToolCatalog):
-    """Empty by default: agents discover no tools until a catalog is wired."""
-
-
 @component(on_missing_selector=Upstream)
-class _UnwiredUpstream:
-    """Fail-fast default: an app MUST wire a real tool executor. Booting
-    without one is fine; the first tool call reports the missing wiring."""
+class _McpUpstream(McpUpstreams):
+    """Calls the MCP servers in ``tool_gateway.upstreams``. With none
+    configured, booting is fine and the first call names the missing upstream."""
 
-    async def invoke(self, upstream_id: str, tool_name: str, arguments: dict) -> ToolResult:
-        raise UpstreamUnavailable("no Upstream wired: register a @component implementing tool_gateway.ports.Upstream")
+    def __init__(self, settings: ToolGatewaySettings):
+        super().__init__(settings.upstreams, ttl_seconds=settings.catalog_ttl_seconds)
+
+
+@component(on_missing_selector=ToolCatalog)
+class _McpCatalog(McpUpstreams):
+    """Lists the tools of the MCP servers in ``tool_gateway.upstreams`` (none: empty)."""
+
+    def __init__(self, settings: ToolGatewaySettings):
+        super().__init__(settings.upstreams, ttl_seconds=settings.catalog_ttl_seconds)
 
 
 @factory

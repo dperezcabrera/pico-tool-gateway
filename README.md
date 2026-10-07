@@ -10,11 +10,11 @@ A pico module that runs in **one process with no companion services** — no bro
 from pico_ioc import init
 from tool_gateway import ToolGateway
 
-container = init(modules=["tool_gateway", my_app])  # my_app registers a real Upstream
+container = init(modules=["tool_gateway", my_app])
 gateway = container.get(ToolGateway)
 ```
 
-Every port has a safe in-process default (`on_missing_selector`) except `Upstream` — the real tool executor is yours to wire; booting without one is fine, the first call reports it. Override any default by registering your own `@component` of the same protocol. Async approval is a durable ticket plus an in-process `resume()` call, so nothing else needs to be running.
+Every port has a default (`on_missing_selector`). `Upstream` and `ToolCatalog` default to the MCP servers configured in `tool_gateway.upstreams` (see below); with none configured, booting is fine and the first call names the missing upstream. Override any default by registering your own `@component` of the same protocol. Async approval is a durable ticket plus an in-process `resume()` call, so nothing else needs to be running.
 
 With `pico_boot.init()` the module auto-discovers via its `pico_boot.modules` entry point — an app never lists it:
 
@@ -22,6 +22,22 @@ With `pico_boot.init()` the module auto-discovers via its `pico_boot.modules` en
 from pico_boot import init
 container = init(modules=[my_app])   # tool_gateway loads itself
 ```
+
+## MCP upstreams
+
+Point the gateway at MCP servers by URL (streamable HTTP):
+
+```yaml
+tool_gateway:
+  upstreams:
+    bank: http://bank-mcp:8000/mcp
+    github: http://github-mcp:8000/mcp
+  catalog_ttl_seconds: 30
+```
+
+Agents see each server's tools as `<upstream>.<tool>` (`bank.wire`), with the server's description, input schema and annotations. A call goes through the pipeline and then to the server via the official `mcp` SDK client, with the verified agent in the request `_meta` (`agent_id`) so a multi-tenant server knows who is calling. Each operation opens its own connection, so an upstream restart loses nothing; the tool listing is reused for `catalog_ttl_seconds`. An upstream that cannot list its tools fails the listing loudly instead of disappearing from the catalog.
+
+A server built with [pico-mcp](https://github.com/dperezcabrera/pico-mcp) declares its risk with `@tool(read_only=True)` / `@tool(destructive=True)`, and the policy routes by it with `hints` (below): read-only calls pass, destructive ones wait for an operator.
 
 ## HTTP edge
 
@@ -119,7 +135,7 @@ Here the orchestration is a list of composable steps, audit is declarative, and 
 
 ## Ports to implement for production
 
-`GrantResolver`, `SchemaValidator`, `SecretResolver`, `Upstream`, `TicketStore`, `AuditLog` (see `ports.py`). The `adapters/memory.py` set is a complete, runnable reference — swap them one at a time for a vault, an MCP session and a database.
+`GrantResolver`, `SchemaValidator`, `SecretResolver`, `Upstream`, `TicketStore`, `AuditLog`, `ToolCatalog` (see `ports.py`). MCP servers are covered by `adapters/mcp_upstreams.py`; the `adapters/memory.py` set is a complete, runnable reference for the rest — swap them one at a time for a vault and a database.
 
 ## Development
 

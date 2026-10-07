@@ -40,9 +40,10 @@ class SecretResolver(Protocol):
 
 @runtime_checkable
 class Upstream(Protocol):
-    """The actual tool executor (an MCP session, an HTTP client, ...)."""
+    """The actual tool executor (an MCP session, an HTTP client, ...). Gets the
+    whole call: arguments already materialized, ``agent_id`` already verified."""
 
-    async def invoke(self, upstream_id: str, tool_name: str, arguments: dict[str, Any]) -> ToolResult: ...
+    async def invoke(self, call: ToolCall) -> ToolResult: ...
 
 
 @runtime_checkable
