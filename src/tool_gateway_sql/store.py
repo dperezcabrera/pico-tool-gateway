@@ -35,6 +35,17 @@ class AuditRow(AppBase):
     fields: Mapped[dict] = mapped_column(JSON)
 
 
+class PolicyRow(AppBase):
+    """Append-only: every publish is a new version, kept for audit and rollback."""
+
+    __tablename__ = "tool_gateway_policy"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    doc: Mapped[dict] = mapped_column(JSON)
+    published_by: Mapped[str] = mapped_column(String(255))
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 def _decision(raw: dict) -> Decision:
     return Decision(**{**raw, "status": DecisionStatus(raw["status"])})
 
@@ -133,13 +144,38 @@ class SqlAuditLog:
 
 
 @component
+class SqlPolicySource:
+    """The policy as versioned rows shared by every replica. A refresh asks
+    only for the latest id; the document is read when it changed."""
+
+    def __init__(self, sessions: SessionManager):
+        self._sessions = sessions
+
+    async def load_policy(self, newer_than: str | None) -> tuple[str, dict] | None:
+        async with self._sessions.transaction(read_only=True) as session:
+            latest = (await session.execute(select(PolicyRow.id).order_by(PolicyRow.id.desc()).limit(1))).scalar()
+            if latest is None or str(latest) == newer_than:
+                return None
+            return str(latest), (await session.get(PolicyRow, latest)).doc
+
+    async def publish_policy(self, doc: dict, *, by: str = "") -> str:
+        async with self._sessions.transaction() as session:
+            row = PolicyRow(doc=doc, published_by=by, published_at=datetime.now(UTC))
+            session.add(row)
+            await session.flush()
+            return str(row.id)
+
+
+@component
 class GatewaySchema:
-    """Creates the two gateway tables if missing (a pico-sqlalchemy DatabaseConfigurer)."""
+    """Creates the gateway tables if missing (a pico-sqlalchemy DatabaseConfigurer)."""
 
     def configure_database(self, engine) -> None:
         async def _create() -> None:
             async with engine.begin() as conn:
-                await conn.run_sync(AppBase.metadata.create_all, tables=[TicketRow.__table__, AuditRow.__table__])
+                await conn.run_sync(
+                    AppBase.metadata.create_all, tables=[TicketRow.__table__, AuditRow.__table__, PolicyRow.__table__]
+                )
             await engine.dispose()  # asyncpg pools are bound to this loop
 
         asyncio.run(_create())

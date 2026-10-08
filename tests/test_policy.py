@@ -1,6 +1,8 @@
 """The declarative policy engine: rule matching, conditions, first-match,
 default, and hot reload."""
 
+import json
+
 import pytest
 
 from tool_gateway import ApprovalMode, ToolCall
@@ -71,10 +73,10 @@ async def test_missing_arg_fails_condition_closed():
     assert await p.grant_for(call("x.y")) is None  # no 'amount' -> condition false -> no match
 
 
-async def test_hot_reload_swaps_rules():
+async def test_publish_swaps_rules():
     p = DeclarativePolicy(default="deny", rules=[])
     assert await p.grant_for(call("github.get_pr")) is None
-    p.reload(default="deny", rules=[{"tool": "github.*", "mode": "auto"}])
+    await p.publish({"default": "deny", "rules": [{"tool": "github.*", "mode": "auto"}]})
     assert (await p.grant_for(call("github.get_pr"))).approval_mode is ApprovalMode.AUTO
 
 
@@ -145,10 +147,61 @@ async def test_trust_takes_globs_and_reloads_from_the_file(tmp_path):
 
     doc = tmp_path / "policy.json"
     doc.write_text(json.dumps({"default": "deny", "trust_hints_from": ["internal-*"], "rules": HINT_RULES}))
-    p = DeclarativePolicy(path=str(doc))
+    p = DeclarativePolicy(path=str(doc), refresh_seconds=0)
     trusted = await p.grant_for(annotated("internal-crm.lookup", readOnlyHint=True))
     assert trusted.approval_mode is ApprovalMode.AUTO
     doc.write_text(json.dumps({"default": "deny", "rules": HINT_RULES}))
-    p.reload_from_file()
     revoked = await p.grant_for(annotated("internal-crm.lookup", readOnlyHint=True))
     assert revoked.approval_mode is ApprovalMode.INTERACTIVE
+
+
+AUTO_GITHUB = {"default": "deny", "rules": [{"tool": "github.*", "mode": "auto"}]}
+
+
+async def test_replicas_sharing_a_source_converge_on_a_publish(tmp_path):
+    from tool_gateway.policy import FilePolicySource
+
+    path = str(tmp_path / "policy.json")
+    a = DeclarativePolicy(source=FilePolicySource(path), refresh_seconds=0)
+    b = DeclarativePolicy(source=FilePolicySource(path), refresh_seconds=0)
+    assert await b.grant_for(call("github.get_pr")) is None  # no policy yet: deny
+    version = await a.publish(AUTO_GITHUB, by="ops")
+    assert (await b.grant_for(call("github.get_pr"))).approval_mode is ApprovalMode.AUTO
+    assert b.current() == (version, AUTO_GITHUB)
+
+
+async def test_an_invalid_publish_is_rejected_and_stores_nothing():
+    from tool_gateway.policy import MemoryPolicySource
+
+    source = MemoryPolicySource(AUTO_GITHUB)
+    p = DeclarativePolicy(source=source)
+    with pytest.raises(PolicyError):
+        await p.publish({"rules": [{"tool": "*", "mode": "nonsense"}]})
+    assert await source.load_policy(None) == ("1", AUTO_GITHUB)
+
+
+async def test_a_broken_document_keeps_the_last_good_policy(tmp_path):
+    doc = tmp_path / "policy.json"
+    doc.write_text(json.dumps(AUTO_GITHUB))
+    p = DeclarativePolicy(path=str(doc), refresh_seconds=0)
+    assert (await p.grant_for(call("github.get_pr"))).approval_mode is ApprovalMode.AUTO
+    doc.write_text("{ not json")  # someone edits the file by hand
+    assert (await p.grant_for(call("github.get_pr"))).approval_mode is ApprovalMode.AUTO
+    doc.write_text(json.dumps({"rules": [{"tool": "*", "mode": "nonsense"}]}))
+    assert (await p.grant_for(call("github.get_pr"))).approval_mode is ApprovalMode.AUTO
+
+
+async def test_the_source_is_asked_at_most_once_per_interval():
+    from tool_gateway.policy import MemoryPolicySource
+
+    class Counting(MemoryPolicySource):
+        loads = 0
+
+        async def load_policy(self, newer_than):
+            Counting.loads += 1
+            return await super().load_policy(newer_than)
+
+    p = DeclarativePolicy(source=Counting(AUTO_GITHUB), refresh_seconds=60)
+    for _ in range(100):
+        await p.grant_for(call("github.get_pr"))
+    assert Counting.loads == 1

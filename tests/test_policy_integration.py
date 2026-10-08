@@ -102,17 +102,31 @@ def test_operator_hot_reloads_policy(harness):
         ).json()["error"]["message"]
     )
 
-    # push a new ruleset; no restart
-    r = client.post(
-        "/api/v1/policy/reload",
-        json={"default": "deny", "rules": [{"tool": "slack.*", "mode": "auto"}]},
-        headers=operator,
-    )
-    assert r.json() == {"status": "reloaded"}
+    # publish a new ruleset; no restart
+    new = {"default": "deny", "rules": [{"tool": "slack.*", "mode": "auto"}]}
+    version = client.post("/api/v1/policy", json=new, headers=operator).json()["version"]
     assert call(client, agent, "slack.post")["isError"] is False  # now allowed
+    assert client.get("/api/v1/policy", headers=operator).json() == {"version": version, "policy": new}
 
 
-def test_reload_is_operator_only(harness):
+def test_publish_writes_the_shared_file(harness):
+    client, container, policy_file = harness
+    operator = bearer(container, "admin@gw.local", "operator")
+    new = {"default": "auto", "rules": []}
+    client.post("/api/v1/policy", json=new, headers=operator)
+    assert json.loads(policy_file.read_text()) == new  # what the other replicas read
+
+
+def test_an_invalid_policy_is_refused(harness):
+    client, container, _ = harness
+    operator = bearer(container, "admin@gw.local", "operator")
+    r = client.post("/api/v1/policy", json={"rules": [{"tool": "*", "mode": "nonsense"}]}, headers=operator)
+    assert r.status_code == 422
+    assert client.get("/api/v1/policy", headers=operator).json()["policy"] == POLICY
+
+
+def test_policy_is_operator_only(harness):
     client, container, _ = harness
     agent = bearer(container, "agent-1", "agent")
-    assert client.post("/api/v1/policy/reload", json={"rules": []}, headers=agent).status_code == 403
+    assert client.post("/api/v1/policy", json={"rules": []}, headers=agent).status_code == 403
+    assert client.get("/api/v1/policy", headers=agent).status_code == 403

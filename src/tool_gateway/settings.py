@@ -16,6 +16,8 @@ class ToolGatewaySettings:
     # plug-and-play artifact — edit it and POST /api/v1/policy/reload. Empty
     # means deny-all.
     policy_path: str = ""
+    # how often each replica asks the PolicySource for a newer version
+    policy_refresh_seconds: float = 5.0
     # upstream_id -> streamable HTTP URL of an MCP server; tools are listed as
     # "<upstream_id>.<tool>" with the server's annotations
     upstreams: dict[str, str] = field(default_factory=dict)

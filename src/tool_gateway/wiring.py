@@ -24,13 +24,14 @@ from .adapters.memory import (
 )
 from .adapters.webhook import WebhookNotifier
 from .gateway import ToolGateway
-from .policy import DeclarativePolicy
+from .policy import DeclarativePolicy, FilePolicySource, MemoryPolicySource
 from .ports import (
     ApproverNotifier,
     AuditLog,
     DecisionSignal,
     GatewayStep,
     GrantResolver,
+    PolicySource,
     RateLimiter,
     SchemaValidator,
     SecretResolver,
@@ -41,14 +42,29 @@ from .ports import (
 from .settings import ToolGatewaySettings
 
 
-@component(on_missing_selector=GrantResolver)
-class _DefaultPolicy(DeclarativePolicy):
-    """Default authorizer: declarative rules from the JSON policy file at
-    ``tool_gateway.policy_path`` (deny-all when unset). Override by
-    registering your own GrantResolver (e.g. an OPA/Cedar adapter)."""
+@component(on_missing_selector=PolicySource)
+class _DefaultPolicySource:
+    """The JSON file at ``tool_gateway.policy_path``; without one, an empty
+    in-process source (deny all until a policy is published)."""
 
     def __init__(self, settings: ToolGatewaySettings):
-        super().__init__(path=settings.policy_path)
+        self._inner = FilePolicySource(settings.policy_path) if settings.policy_path else MemoryPolicySource()
+
+    async def load_policy(self, newer_than: str | None):
+        return await self._inner.load_policy(newer_than)
+
+    async def publish_policy(self, doc: dict, *, by: str = "") -> str:
+        return await self._inner.publish_policy(doc, by=by)
+
+
+@component(on_missing_selector=GrantResolver)
+class _DefaultPolicy(DeclarativePolicy):
+    """Default authorizer: declarative rules from the PolicySource, refreshed
+    every ``tool_gateway.policy_refresh_seconds``. Override by registering
+    your own GrantResolver (e.g. an OPA/Cedar adapter)."""
+
+    def __init__(self, settings: ToolGatewaySettings, source: PolicySource):
+        super().__init__(source=source, refresh_seconds=settings.policy_refresh_seconds)
 
 
 @component(on_missing_selector=SchemaValidator)

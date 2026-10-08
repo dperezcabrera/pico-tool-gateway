@@ -12,7 +12,7 @@ from sqlalchemy import select
 from tool_gateway import ApprovalMode, Decision, DecisionStatus, Grant, Pending, ToolCall, ToolGateway
 from tool_gateway.adapters.memory import EchoUpstream
 from tool_gateway.ports import AuditLog, TicketStore, Upstream
-from tool_gateway_sql import SqlAuditLog, SqlTicketStore
+from tool_gateway_sql import SqlAuditLog, SqlPolicySource, SqlTicketStore
 from tool_gateway_sql.store import AuditRow
 
 pytestmark = pytest.mark.asyncio
@@ -134,3 +134,19 @@ async def test_a_verdict_is_final_across_replicas(boot):
     )
     assert sorted(outcomes) == [False, True]
     assert await a.get(TicketStore).decide(pending.ticket_id, approve) is False
+
+
+async def test_a_policy_published_on_one_replica_reaches_the_other(boot):
+    from tool_gateway.policy import DeclarativePolicy
+    from tool_gateway_sql.store import PolicyRow
+
+    a, b = boot(), boot()
+    pa = DeclarativePolicy(source=a.get(SqlPolicySource), refresh_seconds=0)
+    pb = DeclarativePolicy(source=b.get(SqlPolicySource), refresh_seconds=0)
+    assert await pb.grant_for(a_call()) is None
+    await pa.publish({"default": "deny", "rules": [{"tool": "github.*", "mode": "auto"}]}, by="ops@x")
+    await pa.publish({"default": "deny", "rules": [{"tool": "github.*", "mode": "async"}]}, by="ops@y")
+    assert (await pb.grant_for(a_call())).approval_mode is ApprovalMode.ASYNC
+    async with a.get(SessionManager).transaction(read_only=True) as session:
+        history = (await session.execute(select(PolicyRow.published_by).order_by(PolicyRow.id))).scalars().all()
+    assert history == ["ops@x", "ops@y"]  # every version kept, with who published it

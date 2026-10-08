@@ -10,7 +10,7 @@ from pico_fastapi import controller, get, post
 
 from .domain import Decision, DecisionStatus, GatewayError
 from .gateway import TicketAlreadyDecided, ToolGateway, UnknownTicket
-from .policy import PolicyError
+from .policy import DeclarativePolicy, PolicyError
 from .ports import GrantResolver, TicketStore
 
 
@@ -68,24 +68,31 @@ class TicketController:
 
 @controller(prefix="/api/v1/policy", tags=["Policy"])
 class PolicyController:
-    """Hot-reload the authorization policy without a restart. Push a new
-    ruleset in the body, or re-read the policy file if none is given."""
+    """Read and publish the declarative policy. A publish is stored in the
+    shared PolicySource, so every replica applies it within its refresh
+    interval; the replica that took it applies it at once."""
 
     def __init__(self, grants: GrantResolver):
         self._grants = grants
 
+    def _declarative(self) -> DeclarativePolicy:
+        if not isinstance(self._grants, DeclarativePolicy):
+            raise HTTPException(409, "the active GrantResolver is not the declarative policy")
+        return self._grants
+
     @requires_role("operator")
-    @post("/reload")
-    async def reload(self, body: dict | None = None):
+    @get("")
+    async def current(self):
+        policy = self._declarative()
+        await policy.refresh()
+        version, doc = policy.current()
+        return {"version": version, "policy": doc}
+
+    @requires_role("operator")
+    @post("")
+    async def publish(self, body: dict):
         try:
-            if body and "rules" in body:
-                self._grants.reload(body.get("default", "deny"), body["rules"], body.get("trust_hints_from"))
-            elif hasattr(self._grants, "reload_from_file"):
-                self._grants.reload_from_file()
-            else:
-                raise HTTPException(400, "no ruleset in body and no policy file configured")
+            version = await self._declarative().publish(body, by=SecurityContext.require().sub)
         except PolicyError as exc:
             raise HTTPException(422, str(exc)) from exc
-        except AttributeError as exc:  # a non-reloadable GrantResolver was wired
-            raise HTTPException(409, "active policy source is not reloadable") from exc
-        return {"status": "reloaded"}
+        return {"version": version}

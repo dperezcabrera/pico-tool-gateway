@@ -3,8 +3,8 @@
 Policy is an ordered list of rules plus a default. Each rule matches on the
 agent, the tool (glob), and optional conditions over the call arguments, and
 yields an approval mode or a denial. First match wins; no match falls to the
-default. Change policy by editing the document and reloading — no gateway
-code, no companion process. Pure stdlib (fnmatch); a Rego/Cedar engine plugs
+default. Change policy by publishing a new document — no gateway code, no restart;
+every replica picks it up from the shared PolicySource. Pure stdlib (fnmatch); a Rego/Cedar engine plugs
 into the same GrantResolver port when you outgrow this.
 
     default: deny
@@ -26,13 +26,20 @@ the upstream, so they count only for upstreams listed in ``trust_hints_from``
 the conservative reading (possibly destructive, open world).
 """
 
+import asyncio
+import hashlib
 import json
+import logging
+import os
+import time
 from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
 from .domain import ApprovalMode, Grant, ToolCall
+
+logger = logging.getLogger(__name__)
 
 _OPS = {
     "eq": lambda a, b: a == b,
@@ -132,51 +139,140 @@ def _compile_rule(raw: dict) -> _Rule:
     )
 
 
+@dataclass
+class _Compiled:
+    rules: list[_Rule]
+    default: Grant | None
+    trust: list[str]
+
+
+def compile_policy(doc: dict) -> _Compiled:
+    """Validate and compile a policy document; raises PolicyError, changes nothing."""
+    rules = [_compile_rule(r) for r in doc.get("rules") or []]
+    default = doc.get("default", "deny")
+    if default == "deny":
+        default_grant = None
+    else:
+        try:
+            default_grant = Grant(ApprovalMode(default))
+        except ValueError as exc:
+            raise PolicyError(f"invalid default {default!r}") from exc
+    return _Compiled(rules, default_grant, [str(g) for g in doc.get("trust_hints_from") or []])
+
+
+class MemoryPolicySource:
+    """One process only: publishing here reaches no other replica."""
+
+    def __init__(self, doc: dict | None = None):
+        self._doc = doc
+        self._version = 1 if doc is not None else 0
+
+    async def load_policy(self, newer_than: str | None) -> tuple[str, dict] | None:
+        if self._doc is None or str(self._version) == newer_than:
+            return None
+        return str(self._version), self._doc
+
+    async def publish_policy(self, doc: dict, *, by: str = "") -> str:
+        self._doc, self._version = doc, self._version + 1
+        return str(self._version)
+
+
+class FilePolicySource:
+    """A JSON file, versioned by content hash. Replicas that share the file
+    (a mounted volume, a ConfigMap) converge on whatever it holds."""
+
+    def __init__(self, path: str):
+        self._path = Path(path)
+
+    async def load_policy(self, newer_than: str | None) -> tuple[str, dict] | None:
+        try:
+            raw = await asyncio.to_thread(self._path.read_bytes)
+        except FileNotFoundError:
+            return None
+        version = hashlib.sha256(raw).hexdigest()[:16]
+        return None if version == newer_than else (version, json.loads(raw))
+
+    async def publish_policy(self, doc: dict, *, by: str = "") -> str:
+        raw = json.dumps(doc, indent=2).encode()
+        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
+        await asyncio.to_thread(tmp.write_bytes, raw)
+        await asyncio.to_thread(os.replace, tmp, self._path)  # atomic: readers never see half a file
+        return hashlib.sha256(raw).hexdigest()[:16]
+
+
 class DeclarativePolicy:
-    """A GrantResolver driven by declarative rules; swap the ruleset at
-    runtime with :meth:`reload` (an operator can push new policy without a
-    restart)."""
+    """A GrantResolver driven by declarative rules kept in a PolicySource.
+
+    Every replica asks the source for a newer version at most every
+    ``refresh_seconds`` and recompiles only when it changed, so a publish
+    reaches all replicas within that time without any coordination. A
+    document that fails to compile is logged and ignored: the replica keeps
+    its last good policy. With no policy loaded at all, everything is denied.
+    """
 
     def __init__(
         self,
         default: str = "deny",
         rules: list[dict] | None = None,
         *,
-        path: str = "",
         trust_hints_from: list[str] | None = None,
+        path: str = "",
+        source: Any = None,
+        refresh_seconds: float = 5.0,
     ):
-        self._default: Grant | None = None
-        self._rules: list[_Rule] = []
-        self._trust: list[str] = []
-        self._path = path
-        if path:
-            self.reload_from_file()
-        else:
-            self.reload(default, rules or [], trust_hints_from)
-
-    def reload_from_file(self) -> None:
-        """Re-read the JSON policy file (edit it, then reload — no restart)."""
-        if not self._path:
-            raise PolicyError("no policy file configured")
-        doc = json.loads(Path(self._path).read_text(encoding="utf-8"))
-        self.reload(doc.get("default", "deny"), doc.get("rules") or [], doc.get("trust_hints_from"))
-
-    def reload(self, default: str, rules: list[dict], trust_hints_from: list[str] | None = None) -> None:
-        compiled = [_compile_rule(r) for r in rules]  # fail-fast on a bad ruleset
-        if default == "deny":
-            default_grant = None
-        else:
-            try:
-                default_grant = Grant(ApprovalMode(default))
-            except ValueError as exc:
-                raise PolicyError(f"invalid default {default!r}") from exc
-        self._rules = compiled
-        self._default = default_grant
-        self._trust = [str(g) for g in trust_hints_from or []]
+        self._compiled: _Compiled | None = None
+        self._doc: dict | None = None
+        self._version: str | None = None
+        self._checked = float("-inf")
+        self._refresh = refresh_seconds
+        self._lock = asyncio.Lock()
+        if source is None and not path:
+            doc = {"default": default, "rules": rules or [], "trust_hints_from": trust_hints_from or []}
+            self._compiled = compile_policy(doc)  # fail fast on a bad inline ruleset
+            source = MemoryPolicySource(doc)
+            self._doc, self._version, self._checked = doc, "1", time.monotonic()
+        self._source = source or FilePolicySource(path)
 
     async def grant_for(self, call: ToolCall) -> Grant | None:
-        trusted = any(fnmatchcase(call.upstream_id, g) for g in self._trust)
-        for rule in self._rules:
+        await self._refresh_if_due()
+        policy = self._compiled
+        if policy is None:
+            return None  # nothing loaded: fail closed
+        trusted = any(fnmatchcase(call.upstream_id, g) for g in policy.trust)
+        for rule in policy.rules:
             if rule.matches(call, trusted):
                 return None if rule.deny else Grant(rule.mode, rule.input_schema)
-        return self._default
+        return policy.default
+
+    async def publish(self, doc: dict, *, by: str = "") -> str:
+        """Validate, store as the new version for every replica, apply here now."""
+        compiled = compile_policy(doc)
+        version = await self._source.publish_policy(doc, by=by)
+        self._compiled, self._doc, self._version, self._checked = compiled, doc, version, time.monotonic()
+        return version
+
+    async def refresh(self) -> None:
+        """Check the source now instead of waiting for the next interval."""
+        self._checked = float("-inf")
+        await self._refresh_if_due()
+
+    def current(self) -> tuple[str | None, dict | None]:
+        return self._version, self._doc
+
+    async def _refresh_if_due(self) -> None:
+        if time.monotonic() - self._checked < self._refresh:
+            return
+        async with self._lock:
+            if time.monotonic() - self._checked < self._refresh:
+                return  # another caller refreshed while this one waited
+            self._checked = time.monotonic()
+            try:
+                loaded = await self._source.load_policy(self._version)
+                if loaded is None:
+                    return
+                version, doc = loaded
+                compiled = compile_policy(doc)
+            except Exception:  # noqa: BLE001
+                logger.exception("policy refresh failed; keeping version %s", self._version)
+                return
+            self._compiled, self._doc, self._version = compiled, doc, version

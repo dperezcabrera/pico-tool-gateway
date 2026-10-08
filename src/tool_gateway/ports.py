@@ -142,3 +142,14 @@ class DecisionSignal(Protocol):
         ...
 
     async def signal_decision(self, ticket_id: str) -> None: ...
+
+
+@runtime_checkable
+class PolicySource(Protocol):
+    """Where the declarative policy lives, shared by every replica. Versions
+    are opaque strings; ``load_policy`` returns None when nothing newer than
+    ``newer_than`` exists (or no policy at all), so a periodic check is cheap."""
+
+    async def load_policy(self, newer_than: str | None) -> tuple[str, dict] | None: ...
+
+    async def publish_policy(self, doc: dict, *, by: str = "") -> str: ...

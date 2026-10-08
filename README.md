@@ -142,7 +142,15 @@ Annotations are claims of the upstream, so they only count for the upstreams the
 
 For any other upstream every hint takes its spec default, so a server that claims `readOnlyHint: true` on a tool that deletes is still treated as possibly destructive. No upstream is trusted unless listed.
 
-An operator hot-reloads it with `POST /api/v1/policy/reload` (push a body or re-read the file) — no restart. The `DeclarativePolicy` is the default `GrantResolver`; the port stays open, so a Rego/Cedar or remote-PDP adapter drops in when you outgrow declarative rules — this is the Policy Enforcement Point, the decision engine is pluggable.
+**One policy for every replica.** The document lives in a `PolicySource` that all replicas share, and is versioned. An operator publishes a new one with `POST /api/v1/policy` (the body is the document) and reads the live one with `GET /api/v1/policy` (`{"version", "policy"}`); both need the `operator` role. A publish is validated before it is stored, so an invalid document answers 422 and changes nothing. The replica that took the publish applies it at once; every other replica asks the source for a newer version every `tool_gateway.policy_refresh_seconds` (5 s) and recompiles only when it changed, so all of them converge within that interval with no coordination. A document that does not compile (a hand-edited file with a typo) is logged and ignored: the replica keeps its last good policy. With no policy loaded at all, everything is denied.
+
+| Source | Shared by | Notes |
+|---|---|---|
+| `FilePolicySource` (`policy_path`) | replicas mounting the same file (volume, ConfigMap) | versioned by content hash; publish writes it atomically |
+| `SqlPolicySource` (`tool_gateway_sql`) | replicas on the same database | append-only `tool_gateway_policy` table: every version is kept with who published it, for audit and rollback |
+| `MemoryPolicySource` | one process | default without `policy_path` |
+
+The `DeclarativePolicy` is the default `GrantResolver`; the port stays open, so a Rego/Cedar or remote-PDP adapter drops in when you outgrow declarative rules — this is the Policy Enforcement Point, the decision engine is pluggable.
 
 ## Notifying approvers
 
