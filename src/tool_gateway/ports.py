@@ -74,8 +74,13 @@ class TicketStore(Protocol):
 
     async def complete(self, ticket_id: str, result: ToolResult) -> None: ...
 
-    async def pending(self) -> dict[str, Ticket]:
-        """Tickets still waiting for a decision, oldest first: the operator's queue."""
+    async def pending(
+        self, *, limit: int = 100, after: str | None = None, tool: str | None = None, agent_id: str | None = None
+    ) -> dict[str, Ticket]:
+        """One page of the operator's queue: tickets still waiting for a
+        decision, oldest first, starting after the ticket id ``after``.
+        ``tool`` is a glob over ``upstream.tool`` (``bank.*`` for the bank
+        team); ``agent_id`` matches exactly."""
         ...
 
 

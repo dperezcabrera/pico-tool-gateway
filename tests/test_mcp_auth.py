@@ -201,7 +201,7 @@ def test_operator_lists_the_pending_queue(harness):
     ticket = called["result"]["_meta"]["ticket_id"]
 
     assert client.get("/api/v1/tickets", headers=agent).status_code == 403
-    queue = client.get("/api/v1/tickets", headers=operator).json()
+    queue = client.get("/api/v1/tickets", headers=operator).json()["items"]
     assert queue == [
         {
             "ticket_id": ticket,
@@ -212,7 +212,24 @@ def test_operator_lists_the_pending_queue(harness):
         }
     ]
     client.post(f"/api/v1/tickets/{ticket}/decide", json={"status": "rejected"}, headers=operator)
-    assert client.get("/api/v1/tickets", headers=operator).json() == []
+    assert client.get("/api/v1/tickets", headers=operator).json() == {"items": [], "next": None}
+
+
+def test_the_queue_pages_with_a_cursor(harness):
+    client, container = harness
+    agent = token(container, "agent-1@test", "agent")
+    operator = token(container, "admin@gw.local", "operator")
+    tickets = [_gated(client, container, agent, n=i) for i in range(5)]
+    seen, cursor = [], None
+    while True:
+        params = {"limit": 2, **({"after": cursor} if cursor else {})}
+        page = client.get("/api/v1/tickets", params=params, headers=operator).json()
+        seen += [item["ticket_id"] for item in page["items"]]
+        cursor = page["next"]
+        if cursor is None:
+            break
+    assert seen == tickets
+    assert client.get("/api/v1/tickets", params={"limit": 10_000}, headers=operator).status_code == 200
 
 
 def _gated(client, container, agent, **args) -> str:

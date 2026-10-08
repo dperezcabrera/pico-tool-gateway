@@ -7,6 +7,7 @@ fleet swaps them for a vault, an MCP transport and a DB one at a time.
 import asyncio
 import copy
 import time
+from fnmatch import fnmatchcase
 
 from ..domain import (
     Decision,
@@ -136,10 +137,23 @@ class MemoryTicketStore:
         self._claimed.add(ticket_id)
         return True
 
-    async def pending(self) -> dict[str, Ticket]:
-        return {
-            tid: copy.deepcopy(t) for tid, t in self._tickets.items() if t.decision.status is DecisionStatus.PENDING
-        }
+    async def pending(
+        self, *, limit: int = 100, after: str | None = None, tool: str | None = None, agent_id: str | None = None
+    ) -> dict[str, Ticket]:
+        page: dict[str, Ticket] = {}
+        started = after is None
+        for tid, t in self._tickets.items():  # insertion order is creation order
+            if not started:
+                started = tid == after
+                continue
+            if t.decision.status is not DecisionStatus.PENDING:
+                continue
+            if (tool and not fnmatchcase(t.call.full_name, tool)) or (agent_id and t.call.agent_id != agent_id):
+                continue
+            page[tid] = copy.deepcopy(t)
+            if len(page) == limit:
+                break
+        return page
 
     async def complete(self, ticket_id: str, result: ToolResult) -> None:
         self._tickets[ticket_id].result = copy.deepcopy(result)

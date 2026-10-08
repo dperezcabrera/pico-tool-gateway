@@ -5,7 +5,7 @@ from typing import Any
 
 from pico_ioc import component
 from pico_sqlalchemy import AppBase, Mapped, SessionManager, mapped_column
-from sqlalchemy import JSON, DateTime, String, select, update
+from sqlalchemy import JSON, DateTime, Index, String, and_, or_, select, update
 
 from tool_gateway.domain import Decision, DecisionStatus, Ticket, ToolCall, ToolResult
 
@@ -15,12 +15,15 @@ class TicketRow(AppBase):
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     agent_id: Mapped[str] = mapped_column(String(255), index=True)
-    status: Mapped[str] = mapped_column(String(16), index=True)
+    tool: Mapped[str] = mapped_column(String(255), index=True)
+    status: Mapped[str] = mapped_column(String(16))
     call: Mapped[dict] = mapped_column(JSON)
     decision: Mapped[dict] = mapped_column(JSON)
     claimed: Mapped[bool] = mapped_column(default=False)
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_tool_gateway_tickets_queue", "status", "created_at", "id"),)
 
 
 class AuditRow(AppBase):
@@ -65,6 +68,7 @@ class SqlTicketStore:
                 TicketRow(
                     id=ticket_id,
                     agent_id=call.agent_id,
+                    tool=call.full_name,
                     status=pending.status.value,
                     call=dataclasses.asdict(call),
                     decision={**dataclasses.asdict(pending), "status": pending.status.value},
@@ -104,15 +108,25 @@ class SqlTicketStore:
             )
             return won.rowcount == 1
 
-    async def pending(self) -> dict[str, Ticket]:
+    async def pending(
+        self, *, limit: int = 100, after: str | None = None, tool: str | None = None, agent_id: str | None = None
+    ) -> dict[str, Ticket]:
+        # keyset pagination on (created_at, id): constant cost per page however deep the queue
+        query = select(TicketRow).where(TicketRow.status == DecisionStatus.PENDING.value)
+        if tool:
+            pattern = tool.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_").replace("*", "%")
+            query = query.where(TicketRow.tool.like(pattern, escape="\\"))
+        if agent_id:
+            query = query.where(TicketRow.agent_id == agent_id)
         async with self._sessions.transaction(read_only=True) as session:
-            rows = (
-                await session.execute(
-                    select(TicketRow)
-                    .where(TicketRow.status == DecisionStatus.PENDING.value)
-                    .order_by(TicketRow.created_at)
+            if after is not None:
+                cursor = (await session.execute(select(TicketRow.created_at).where(TicketRow.id == after))).scalar()
+                if cursor is None:
+                    return {}
+                query = query.where(
+                    or_(TicketRow.created_at > cursor, and_(TicketRow.created_at == cursor, TicketRow.id > after))
                 )
-            ).scalars()
+            rows = (await session.execute(query.order_by(TicketRow.created_at, TicketRow.id).limit(limit))).scalars()
             return {row.id: Ticket(call=ToolCall(**row.call), decision=_decision(row.decision)) for row in rows}
 
     async def complete(self, ticket_id: str, result: ToolResult) -> None:

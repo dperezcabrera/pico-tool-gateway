@@ -150,3 +150,18 @@ async def test_a_policy_published_on_one_replica_reaches_the_other(boot):
     async with a.get(SessionManager).transaction(read_only=True) as session:
         history = (await session.execute(select(PolicyRow.published_by).order_by(PolicyRow.id))).scalars().all()
     assert history == ["ops@x", "ops@y"]  # every version kept, with who published it
+
+
+async def test_the_queue_pages_and_filters_by_team_and_agent(boot):
+    container = boot()
+    gw, store = container.get(ToolGateway), container.get(TicketStore)
+    bank = [await gw.call(ToolCall("r", "agent-1", "bank", f"wire_{i}", {})) for i in range(3)]
+    other = await gw.call(ToolCall("r", "agent-2", "github", "create_pr", {}))
+    ids = [p.ticket_id for p in bank]
+
+    first = await store.pending(limit=2, tool="bank.*")
+    second = await store.pending(limit=2, tool="bank.*", after=list(first)[-1])
+    assert list(first) + list(second) == ids
+    assert list(await store.pending(agent_id="agent-2")) == [other.ticket_id]
+    assert await store.pending(tool="bank_*") == {}  # '_' is literal, not a LIKE wildcard
+    assert await store.pending(after="tkt-unknown") == {}

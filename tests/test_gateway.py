@@ -295,3 +295,15 @@ async def test_a_signal_sent_before_the_wait_is_not_lost():
     signal = MemoryDecisionSignal()
     await signal.signal_decision("tkt-1")
     await asyncio.wait_for(signal.wait_for_decision("tkt-1", timeout_seconds=5), timeout=0.5)
+
+
+async def test_memory_queue_pages_and_filters():
+    gw, grants, _s, tickets, _a = build()
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.ASYNC))
+    grants.allow("agent-1", "github.delete_repo", Grant(ApprovalMode.ASYNC))
+    created = [await gw.call(a_call(tool_name=name)) for name in ("create_pr", "delete_repo", "create_pr")]
+    ids = [p.ticket_id for p in created]
+    first = await tickets.pending(limit=2)
+    assert list(first) == ids[:2]
+    assert list(await tickets.pending(after=ids[1])) == ids[2:]
+    assert list(await tickets.pending(tool="github.delete_*")) == [ids[1]]

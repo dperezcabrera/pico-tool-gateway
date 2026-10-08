@@ -13,6 +13,8 @@ from .gateway import TicketAlreadyDecided, ToolGateway, UnknownTicket
 from .policy import DeclarativePolicy, PolicyError
 from .ports import GrantResolver, TicketStore
 
+MAX_PAGE = 500
+
 
 @controller(prefix="/api/v1/tickets", tags=["Tickets"])
 class TicketController:
@@ -22,9 +24,14 @@ class TicketController:
 
     @requires_role("operator")
     @get("")
-    async def pending(self):
-        """The approval queue, oldest first: what a lost notification can still be found in."""
-        return [
+    async def pending(
+        self, limit: int = 100, after: str | None = None, tool: str | None = None, agent_id: str | None = None
+    ):
+        """One page of the approval queue, oldest first: what a lost notification
+        can still be found in. ``next`` is the cursor for the following page."""
+        limit = max(1, min(limit, MAX_PAGE))
+        page = await self._tickets.pending(limit=limit, after=after, tool=tool, agent_id=agent_id)
+        items = [
             {
                 "ticket_id": ticket_id,
                 "agent_id": t.call.agent_id,
@@ -32,8 +39,9 @@ class TicketController:
                 "arguments": t.call.arguments,
                 "annotations": t.call.annotations,
             }
-            for ticket_id, t in (await self._tickets.pending()).items()
+            for ticket_id, t in page.items()
         ]
+        return {"items": items, "next": items[-1]["ticket_id"] if len(items) == limit else None}
 
     @requires_role("operator")
     @post("/{ticket_id}/decide")
