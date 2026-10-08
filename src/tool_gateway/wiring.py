@@ -11,7 +11,7 @@ No broker, no worker, no external DB: async approval is a durable ticket
 plus an in-process ``resume()`` call, not a separate consumer.
 """
 
-from pico_ioc import component, factory, provides
+from pico_ioc import cleanup, component, factory, provides
 
 from .adapters.mcp_upstreams import McpUpstreams
 from .adapters.memory import (
@@ -97,6 +97,10 @@ class _McpUpstream(McpUpstreams):
     def __init__(self, settings: ToolGatewaySettings):
         super().__init__(settings.upstreams, ttl_seconds=settings.catalog_ttl_seconds)
 
+    @cleanup
+    def _close_sessions(self) -> None:
+        self.close()
+
 
 @component(on_missing_selector=ToolCatalog)
 class _McpCatalog(McpUpstreams):
@@ -104,6 +108,10 @@ class _McpCatalog(McpUpstreams):
 
     def __init__(self, settings: ToolGatewaySettings):
         super().__init__(settings.upstreams, ttl_seconds=settings.catalog_ttl_seconds)
+
+    @cleanup
+    def _close_sessions(self) -> None:
+        self.close()
 
 
 @component(on_missing_selector=ApproverNotifier)

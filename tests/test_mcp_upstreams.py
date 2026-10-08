@@ -142,3 +142,72 @@ async def test_default_wiring_without_upstreams_names_the_gap():
         await container.get(Upstream).call_tool(call("github.create_pr"))
     assert await container.get(ToolCatalog).tools_for("agent-1") == []
     container.shutdown()
+
+
+class CountingClient:
+    """Wraps the SDK client to count sessions and inject one transport failure."""
+
+    opened = 0
+    fail_next = False
+
+    def __init__(self, target):
+        from mcp import Client
+
+        self._inner = Client(target)
+
+    async def __aenter__(self):
+        CountingClient.opened += 1
+        self._client = await self._inner.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc):
+        return await self._inner.__aexit__(*exc)
+
+    async def list_tools(self):
+        return await self._client.list_tools()
+
+    async def call_tool(self, *args, **kwargs):
+        if CountingClient.fail_next:
+            CountingClient.fail_next = False
+            raise ConnectionError("connection reset by peer")
+        return await self._client.call_tool(*args, **kwargs)
+
+
+@pytest.fixture
+def counting(monkeypatch):
+    import tool_gateway.adapters.mcp_upstreams as module
+
+    CountingClient.opened, CountingClient.fail_next = 0, False
+    monkeypatch.setattr(module, "Client", CountingClient)
+    return CountingClient
+
+
+async def test_calls_share_one_session_per_upstream(counting):
+    import asyncio
+
+    upstreams = McpUpstreams({"bank": bank()})
+    await upstreams.tools_for("agent-1")
+    results = await asyncio.gather(*(upstreams.call_tool(call("bank.balance", account="a")) for _ in range(10)))
+    assert all(r.content == {"result": 1200} for r in results)
+    assert counting.opened == 1  # one handshake for the listing and ten concurrent calls
+    upstreams.close()
+
+
+async def test_a_failed_call_drops_the_session_and_the_next_reconnects(counting):
+    upstreams = McpUpstreams({"bank": bank()})
+    await upstreams.call_tool(call("bank.balance", account="a"))
+    counting.fail_next = True
+    with pytest.raises(ConnectionError):
+        await upstreams.call_tool(call("bank.balance", account="a"))  # not retried: it may have run upstream
+    result = await upstreams.call_tool(call("bank.balance", account="a"))
+    assert result.content == {"result": 1200}
+    assert counting.opened == 2
+    upstreams.close()
+
+
+async def test_a_tool_error_keeps_the_session(counting):
+    upstreams = McpUpstreams({"bank": bank()})
+    assert (await upstreams.call_tool(call("bank.broken"))).is_error
+    await upstreams.call_tool(call("bank.balance", account="a"))
+    assert counting.opened == 1
+    upstreams.close()

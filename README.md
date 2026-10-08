@@ -35,7 +35,7 @@ tool_gateway:
   catalog_ttl_seconds: 30
 ```
 
-Agents see each server's tools as `<upstream>.<tool>` (`bank.wire`), with the server's description, input schema and annotations. A call goes through the pipeline and then to the server via the official `mcp` SDK client, with the verified agent in the request `_meta` (`agent_id`) so a multi-tenant server knows who is calling. Each operation opens its own connection, so an upstream restart loses nothing; the tool listing is reused for `catalog_ttl_seconds`. An upstream that cannot list its tools fails the listing loudly instead of disappearing from the catalog.
+Agents see each server's tools as `<upstream>.<tool>` (`bank.wire`), with the server's description, input schema and annotations. A call goes through the pipeline and then to the server via the official `mcp` SDK client, with the verified agent in the request `_meta` (`agent_id`) so a multi-tenant server knows who is calling. One session per upstream is opened on first use and shared by every call, concurrent ones included, so a call costs one request instead of a fresh handshake (about 4x faster measured locally, more over TLS). A call that fails at the transport drops the session and the next call reconnects; the failed call is not retried, because it may have run upstream. The tool listing is reused for `catalog_ttl_seconds`. An upstream that cannot list its tools fails the listing loudly instead of disappearing from the catalog.
 
 A server built with [pico-mcp](https://github.com/dperezcabrera/pico-mcp) declares its risk with `@tool(read_only=True)` / `@tool(destructive=True)`, and the policy routes by it with `hints` (below): read-only calls pass, destructive ones wait for an operator.
 
@@ -52,7 +52,7 @@ A gated tool does NOT block the agent. `tools/call` returns a **pending** result
 | Endpoint | Auth |
 |---|---|
 | `POST /mcp` (`tools/list`, `tools/call`) | valid agent token; identity from `sub` |
-| `GET /api/v1/tickets` | `operator` role: the pending queue, oldest first |
+| `GET /api/v1/tickets?limit=&after=&tool=&agent_id=` | `operator` role: one page of the pending queue, oldest first |
 | `POST /api/v1/tickets/{id}/decide` | `operator` role |
 | `POST /api/v1/tickets/{id}/resume` | `operator` role |
 
@@ -151,6 +151,10 @@ For any other upstream every hint takes its spec default, so a server that claim
 | `MemoryPolicySource` | one process | default without `policy_path` |
 
 The `DeclarativePolicy` is the default `GrantResolver`; the port stays open, so a Rego/Cedar or remote-PDP adapter drops in when you outgrow declarative rules — this is the Policy Enforcement Point, the decision engine is pluggable.
+
+## The approval queue
+
+`GET /api/v1/tickets` returns one page of the tickets waiting for a decision, oldest first, as `{"items": [...], "next": "<cursor>"}`; pass `next` back as `after` for the following page (`next` is null on the last one). `limit` defaults to 100 and is capped at 500. `tool` is a glob over `upstream.tool` (`bank.*` gives the bank team its own queue) and `agent_id` filters by agent. The SQL store pages by keyset on `(created_at, id)` over an index on `(status, created_at, id)`, so a page costs the same at the head of the queue and a million tickets deep.
 
 ## Notifying approvers
 
