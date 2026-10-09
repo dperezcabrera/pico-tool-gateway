@@ -1,57 +1,60 @@
-"""MCP surface: a JSON-RPC ``POST /mcp`` an agent's MCP client connects to.
+"""MCP surface: ``/mcp`` served by the official SDK, so any MCP client connects
+(Claude Desktop, Cursor, ``mcp.Client``, a bare JSON-RPC POST).
 
-The agent identity comes from the VERIFIED token (pico-client-auth populates
-the SecurityContext), never from the request body.
+Stateless with JSON responses: every request stands alone and carries its own
+token, so replicas need no session affinity and the identity always comes from
+the request being served. The agent identity is the VERIFIED token
+(pico-client-auth's middleware fills the SecurityContext), never the body.
 
 A gated tool does NOT block the agent: ``tools/call`` returns a *pending*
-tool_result at once, informing the agent that approval was requested, so it
-can tell the user and move on. The agent later polls with the built-in
-``gateway.check`` tool to fetch the result once a human decides. MCP stays
-synchronous on the wire; the approval is asynchronous for the agent.
+result at once, informing the agent that approval was requested, so it can
+tell the user and move on. The agent later polls with the built-in
+``gateway.check`` tool to fetch the result once a human decides.
 """
 
-from typing import Any
+import asyncio
+import json
 
+import mcp_types as types
+from fastapi import FastAPI
+from mcp.server.lowlevel import Server
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+from mcp.shared.exceptions import MCPError
 from pico_client_auth import SecurityContext
-from pico_fastapi import controller, post
+from pico_ioc import cleanup, component
+from starlette.routing import Route
 
-from .domain import ApprovalDenied, DecisionStatus, GatewayError, PendingApproval, ToolCall
+from .domain import ApprovalDenied, DecisionStatus, GatewayError, PendingApproval, ToolCall, ToolResult
 from .gateway import Pending, ToolGateway, UnknownTicket
 from .ports import TicketStore, ToolCatalog
 
 CHECK_TOOL = "gateway.check"
 
-_CHECK_SPEC = {
-    "name": CHECK_TOOL,
-    "description": "Fetch the result of a tool call that was pending operator approval. "
+_CHECK_TOOL = types.Tool(
+    name=CHECK_TOOL,
+    description="Fetch the result of a tool call that was pending operator approval. "
     "Pass the ticket_id from a pending response.",
-    "inputSchema": {"type": "object", "required": ["ticket_id"], "properties": {"ticket_id": {"type": "string"}}},
-}
+    input_schema={"type": "object", "required": ["ticket_id"], "properties": {"ticket_id": {"type": "string"}}},
+    annotations=types.ToolAnnotations(read_only_hint=True),
+)
+
+# JSON-RPC error codes, unchanged from the hand-rolled edge this replaces
+_INVALID_PARAMS, _GATEWAY_ERROR, _NO_TICKET = -32602, -32001, -32004
 
 
-def _error(rid: Any, code: int, message: str) -> dict:
-    return {"jsonrpc": "2.0", "id": rid, "error": {"code": code, "message": message}}
+def _text(text: str, *, is_error: bool = False, meta: dict | None = None) -> types.CallToolResult:
+    return types.CallToolResult(content=[types.TextContent(type="text", text=text)], is_error=is_error, meta=meta)
 
 
-def _result(rid: Any, result: Any) -> dict:
-    return {"jsonrpc": "2.0", "id": rid, "result": result}
+def _tool_result(result: ToolResult) -> types.CallToolResult:
+    content = result.content if isinstance(result.content, str) else json.dumps(result.content, default=str)
+    blocks = [types.TextContent(type="text", text=note) for note in result.notes]
+    blocks.append(types.TextContent(type="text", text=content))
+    return types.CallToolResult(content=blocks, is_error=result.is_error)
 
 
-def _text_result(text: str, *, is_error: bool = False, meta: dict | None = None) -> dict:
-    out: dict = {"content": [{"type": "text", "text": text}], "isError": is_error}
-    if meta:
-        out["_meta"] = meta
-    return out
-
-
-def _tool_result(result) -> dict:
-    content = [{"type": "text", "text": note} for note in result.notes]
-    content.append({"type": "text", "text": str(result.content)})
-    return {"content": content, "isError": result.is_error}
-
-
-def _pending(ticket_id: str) -> dict:
-    return _text_result(
+def _pending(ticket_id: str) -> types.CallToolResult:
+    return _text(
         f"This action requires operator approval. Request submitted (ticket {ticket_id}). "
         f"It is pending human review — tell the user, then call the '{CHECK_TOOL}' tool with "
         f'{{"ticket_id": "{ticket_id}"}} to retrieve the result once decided.',
@@ -59,40 +62,94 @@ def _pending(ticket_id: str) -> dict:
     )
 
 
-@controller(prefix="/mcp", tags=["MCP"])
-class McpController:
+def _tool(spec: dict) -> types.Tool:
+    hints = spec.get("annotations") or {}
+    return types.Tool(
+        name=spec["name"],
+        description=spec.get("description") or "",
+        input_schema=spec.get("inputSchema") or {"type": "object"},
+        annotations=types.ToolAnnotations.model_validate(hints) if hints else None,
+    )
+
+
+class _Asgi:
+    """Starlette routes a function or method as request/response; an object is
+    routed as a raw ASGI app, which is what the SDK handler needs."""
+
+    def __init__(self, handler):
+        self._handler = handler
+
+    async def __call__(self, scope, receive, send) -> None:
+        await self._handler(scope, receive, send)
+
+
+@component
+class McpEdge:
+    """Registers ``/mcp`` on the FastAPI app (a pico-fastapi configurer).
+
+    The SDK's request handling needs its session manager running; pico-fastapi
+    owns the app lifespan, so a small owner task starts the manager on the
+    first request and keeps it running until the container shuts down.
+    """
+
+    priority = 0
+
     def __init__(self, gateway: ToolGateway, catalog: ToolCatalog, tickets: TicketStore):
         self._gw = gateway
         self._catalog = catalog
         self._tickets = tickets
+        server = Server("pico-tool-gateway", on_list_tools=self._list_tools, on_call_tool=self._call_tool)
+        self._manager = StreamableHTTPSessionManager(app=server, stateless=True, json_response=True)
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._ready: asyncio.Future | None = None
+        self._stop: asyncio.Event | None = None
 
-    @post("")
-    async def rpc(self, body: dict):
-        rid = body.get("id")
-        method = body.get("method", "")
-        params = body.get("params") or {}
+    def configure_app(self, app: FastAPI) -> None:
+        # an exact route, not a mount: a mount redirects /mcp to /mcp/ and plain
+        # JSON-RPC clients do not follow redirects
+        app.router.routes.append(Route("/mcp", endpoint=_Asgi(self._asgi), methods=["GET", "POST", "DELETE"]))
+
+    async def _asgi(self, scope, receive, send) -> None:
+        loop = asyncio.get_running_loop()
+        if self._loop is not loop:  # the manager is bound to the loop it started on
+            self._loop, self._ready, self._stop = loop, loop.create_future(), asyncio.Event()
+            loop.create_task(self._own(self._ready, self._stop))
+        await self._ready
+        await self._manager.handle_request(scope, receive, send)
+
+    async def _own(self, ready: asyncio.Future, stop: asyncio.Event) -> None:
+        try:
+            async with self._manager.run():
+                ready.set_result(None)
+                await stop.wait()
+        except BaseException as exc:  # noqa: BLE001
+            if not ready.done():
+                ready.set_exception(exc)
+
+    @cleanup
+    def _shutdown(self) -> None:
+        if self._stop is not None:
+            self._stop.set()
+
+    async def _list_tools(self, ctx, params) -> types.ListToolsResult:
+        agent_id = SecurityContext.require().sub
+        specs = await self._catalog.tools_for(agent_id)
+        return types.ListToolsResult(tools=[*(_tool(s) for s in specs), _CHECK_TOOL])
+
+    async def _call_tool(self, ctx, params: types.CallToolRequestParams) -> types.CallToolResult:
         agent_id = SecurityContext.require().sub  # verified identity, not self-asserted
+        arguments = params.arguments or {}
+        if params.name == CHECK_TOOL:
+            return await self._check(agent_id, arguments)
+        return await self._call(str(ctx.request_id), agent_id, params.name, arguments)
 
-        if method == "tools/list":
-            tools = await self._catalog.tools_for(agent_id)
-            return _result(rid, {"tools": [*tools, _CHECK_SPEC]})
-
-        if method == "tools/call":
-            full_name = params.get("name", "")
-            arguments = params.get("arguments") or {}
-            if full_name == CHECK_TOOL:
-                return await self._check(rid, agent_id, arguments)
-            return await self._call(rid, agent_id, full_name, arguments)
-
-        return _error(rid, -32601, f"method not found: {method}")
-
-    async def _call(self, rid, agent_id: str, full_name: str, arguments: dict):
+    async def _call(self, request_id: str, agent_id: str, full_name: str, arguments: dict) -> types.CallToolResult:
         if "." not in full_name:
-            return _error(rid, -32602, f"tool name must be 'upstream.tool', got {full_name!r}")
+            raise MCPError(_INVALID_PARAMS, f"tool name must be 'upstream.tool', got {full_name!r}")
         upstream_id, _, tool_name = full_name.partition(".")
         spec = next((t for t in await self._catalog.tools_for(agent_id) if t.get("name") == full_name), {})
         call = ToolCall(
-            request_id=str(rid),
+            request_id=request_id,
             agent_id=agent_id,
             upstream_id=upstream_id,
             tool_name=tool_name,
@@ -102,29 +159,25 @@ class McpController:
         try:
             outcome = await self._gw.call(call, can_block=False)  # never hold the agent
         except GatewayError as exc:
-            return _error(rid, -32001, str(exc))
+            raise MCPError(_GATEWAY_ERROR, str(exc)) from exc
         if isinstance(outcome, Pending):
-            return _result(rid, _pending(outcome.ticket_id))
-        return _result(rid, _tool_result(outcome))
+            return _pending(outcome.ticket_id)
+        return _tool_result(outcome)
 
-    async def _check(self, rid, agent_id: str, arguments: dict):
+    async def _check(self, agent_id: str, arguments: dict) -> types.CallToolResult:
         ticket_id = arguments.get("ticket_id", "")
         ticket = await self._tickets.get(ticket_id)
-        if ticket is None:
-            return _error(rid, -32004, f"no such ticket: {ticket_id}")
-        call, decision = ticket.call, ticket.decision
-        if call.agent_id != agent_id:  # an agent can only check its own tickets
-            return _error(rid, -32004, f"no such ticket: {ticket_id}")
+        if ticket is None or ticket.call.agent_id != agent_id:  # an agent can only check its own tickets
+            raise MCPError(_NO_TICKET, f"no such ticket: {ticket_id}")
+        decision = ticket.decision
         if decision.status is DecisionStatus.PENDING:
-            return _result(rid, _pending(ticket_id))
+            return _pending(ticket_id)
         try:
             result = await self._gw.resume(ticket_id)
         except PendingApproval:  # approved, and another check is executing it right now
-            return _result(rid, _pending(ticket_id))
+            return _pending(ticket_id)
         except ApprovalDenied as exc:
-            return _result(
-                rid, _text_result(f"Approval denied: {exc}", is_error=True, meta={"status": decision.status.value})
-            )
+            return _text(f"Approval denied: {exc}", is_error=True, meta={"status": decision.status.value})
         except (UnknownTicket, GatewayError) as exc:
-            return _error(rid, -32001, str(exc))
-        return _result(rid, _tool_result(result))
+            raise MCPError(_GATEWAY_ERROR, str(exc)) from exc
+        return _tool_result(result)

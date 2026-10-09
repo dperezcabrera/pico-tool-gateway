@@ -43,7 +43,7 @@ A server built with [pico-mcp](https://github.com/dperezcabrera/pico-mcp) declar
 
 Installing the package brings pico-fastapi + pico-client-auth. There are two authenticated surfaces on two identity planes:
 
-**Agent plane — MCP.** An agent's MCP client connects to `POST /mcp` (JSON-RPC `tools/list` + `tools/call`) with a Bearer token. The agent identity is the **verified `sub` claim**, never a field in the body — an agent cannot claim to be another.
+**Agent plane — MCP.** `/mcp` is served by the official `mcp` SDK, so any MCP client connects with a Bearer token: Claude Desktop, Cursor, `mcp.Client`, or a bare JSON-RPC POST with no handshake. It runs stateless with JSON responses: every request stands alone, so replicas need no session affinity and the identity is always that of the request being served. The agent identity is the **verified `sub` claim**, never a field in the body — an agent cannot claim to be another. Tool results come back as JSON text, after any operator notes.
 
 A gated tool does NOT block the agent. `tools/call` returns a **pending** result at once ("approval requested, ticket X — tell the user, then call `gateway.check`"), so the agent stays free: it informs the user and moves on. When it wants the outcome it polls the built-in `gateway.check` tool with the ticket_id — still pending, denied, or the real result once an operator decides. MCP stays synchronous on the wire; the approval is asynchronous for the agent. An agent can only check its own tickets.
 

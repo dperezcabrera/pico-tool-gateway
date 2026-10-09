@@ -5,6 +5,7 @@ them. An agent reaches /mcp with its token; the operator plane needs the
 operator role. The agent identity comes from the verified sub, never the body.
 """
 
+import json
 import sys
 
 import pytest
@@ -108,7 +109,7 @@ def test_agent_lists_and_calls_a_tool(harness):
         "/mcp", json=rpc("tools/call", name="github.create_pr", arguments={"title": "x"}), headers=agent
     ).json()
     assert called["result"]["isError"] is False
-    assert "'title': 'x'" in called["result"]["content"][-1]["text"]
+    assert json.loads(called["result"]["content"][-1]["text"])["echo"] == {"title": "x"}
 
 
 def test_identity_comes_from_token_not_body(harness):
@@ -160,7 +161,7 @@ def test_gated_call_returns_pending_not_blocked(harness):
     done = client.post(
         "/mcp", json=rpc("tools/call", name="gateway.check", arguments={"ticket_id": ticket}), headers=agent
     ).json()
-    assert "'title': 'gated'" in done["result"]["content"][-1]["text"]
+    assert json.loads(done["result"]["content"][-1]["text"])["echo"] == {"title": "gated"}
 
 
 def test_agent_cannot_check_another_agents_ticket(harness):
@@ -275,3 +276,44 @@ def test_an_operator_can_only_approve_or_reject(harness):
     for status in ("pending", "timeout", "", "maybe"):
         r = client.post(f"/api/v1/tickets/{ticket}/decide", json={"status": status}, headers=operator)
         assert r.status_code == 422, status
+
+
+def test_a_standard_mcp_client_connects(harness):
+    """The SDK's own client: protocol negotiation, tools/list and tools/call over HTTP."""
+    import asyncio
+
+    import httpx2
+    from mcp import Client
+    from mcp.client.streamable_http import streamable_http_client
+
+    client, container = harness
+    agent = token(container, "agent-1@test", "agent")
+
+    async def run():
+        http = httpx2.AsyncClient(transport=httpx2.ASGITransport(app=client.app), base_url="http://gw", headers=agent)
+        async with Client(streamable_http_client("http://gw/mcp", http_client=http)) as mcp:
+            tools = {t.name: t for t in (await mcp.list_tools()).tools}
+            result = await mcp.call_tool("github.create_pr", {"title": "sdk"})
+        return tools, result
+
+    tools, result = asyncio.run(run())
+    assert set(tools) == {"github.create_pr", "gateway.check"}
+    assert tools["gateway.check"].annotations.read_only_hint is True
+    assert result.is_error is False
+    assert json.loads(result.content[-1].text)["echo"] == {"title": "sdk"}
+
+
+def test_a_bare_json_rpc_post_still_works(harness):
+    """fleet-runtime sends one POST with no handshake and no MCP headers."""
+    client, container = harness
+    agent = token(container, "agent-1@test", "agent")
+    r = client.post("/mcp", json=rpc("tools/call", name="github.create_pr", arguments={"title": "raw"}), headers=agent)
+    assert r.status_code == 200
+    assert json.loads(r.json()["result"]["content"][-1]["text"])["echo"] == {"title": "raw"}
+
+
+def test_a_bad_tool_name_is_a_json_rpc_error(harness):
+    client, container = harness
+    agent = token(container, "agent-1@test", "agent")
+    bad = client.post("/mcp", json=rpc("tools/call", name="no_dot", arguments={}), headers=agent).json()
+    assert bad["error"]["code"] == -32602
