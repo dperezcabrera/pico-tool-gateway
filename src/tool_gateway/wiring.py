@@ -170,4 +170,5 @@ class ToolGatewayFactory:
             steps=steps,
             signal=signal,
             decision_recheck_seconds=settings.decision_recheck_seconds,
+            execution_lease_seconds=settings.execution_lease_seconds,
         )

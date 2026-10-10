@@ -24,7 +24,7 @@ from tool_gateway.domain import ApprovalDenied, PendingApproval, SchemaInvalid, 
 from tool_gateway.gateway import Pending, TicketAlreadyDecided
 
 
-def build(*, grants=None, secrets=None, leak=None, echo=True):
+def build(*, grants=None, secrets=None, leak=None, echo=True, lease=600):
     grant_resolver = grants or DictGrantResolver()
     secret_resolver = secrets or DictSecretResolver()
     audit = ListAuditLog()
@@ -38,6 +38,7 @@ def build(*, grants=None, secrets=None, leak=None, echo=True):
         tickets=tickets,
         audit=audit,
         approval_timeout_seconds=1,
+        execution_lease_seconds=lease,
     )
     gw._test_upstream = upstream  # expose the fake for assertions
     return gw, grant_resolver, secret_resolver, tickets, audit
@@ -307,3 +308,27 @@ async def test_memory_queue_pages_and_filters():
     assert list(first) == ids[:2]
     assert list(await tickets.pending(after=ids[1])) == ids[2:]
     assert list(await tickets.pending(tool="github.delete_*")) == [ids[1]]
+
+
+async def _approved_ticket_whose_executor_died(gw, grants, tickets):
+    grants.allow("agent-1", "github.create_pr", Grant(ApprovalMode.ASYNC))
+    pending = await gw.call(a_call(arguments={"amount": 100}))
+    await gw.decide(pending.ticket_id, Decision(DecisionStatus.APPROVED, approver="carol"))
+    assert await tickets.claim(pending.ticket_id)  # an executor took it, then its process died
+    return pending.ticket_id
+
+
+async def test_a_dead_executor_is_closed_as_interrupted_never_rerun():
+    gw, grants, _s, tickets, _a = build(lease=0)
+    ticket_id = await _approved_ticket_whose_executor_died(gw, grants, tickets)
+    result = await gw.resume(ticket_id)
+    assert result.is_error and "outcome is unknown" in result.content
+    assert gw._test_upstream.received == []  # the call may have taken effect: not run again
+    assert (await gw.resume(ticket_id)).content == result.content  # stored, stable
+
+
+async def test_a_claim_within_its_lease_is_still_running():
+    gw, grants, _s, tickets, _a = build(lease=600)
+    ticket_id = await _approved_ticket_whose_executor_died(gw, grants, tickets)
+    with pytest.raises(PendingApproval):
+        await gw.resume(ticket_id)

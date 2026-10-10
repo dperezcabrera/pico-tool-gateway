@@ -165,3 +165,20 @@ async def test_the_queue_pages_and_filters_by_team_and_agent(boot):
     assert list(await store.pending(agent_id="agent-2")) == [other.ticket_id]
     assert await store.pending(tool="bank_*") == {}  # '_' is literal, not a LIKE wildcard
     assert await store.pending(after="tkt-unknown") == {}
+
+
+async def test_a_claim_left_by_a_dead_replica_is_closed_after_the_lease(boot):
+    a, b = boot(), boot(execution_lease_seconds=0)
+    pending = await a.get(ToolGateway).call(a_call(n=1))
+    await a.get(ToolGateway).decide(pending.ticket_id, Decision(DecisionStatus.APPROVED, approver="ops"))
+    assert await a.get(TicketStore).claim(pending.ticket_id)  # replica a dies mid-execution
+    result = await b.get(ToolGateway).resume(pending.ticket_id)
+    assert result.is_error and "outcome is unknown" in result.content
+    assert b.get(_Upstream).received == []
+    outcomes = await asyncio.gather(
+        *(
+            b.get(TicketStore).close_stale_claim(pending.ticket_id, older_than_seconds=0, result=result)
+            for _ in range(2)
+        )
+    )
+    assert outcomes == [False, False]  # already closed: nobody else wins

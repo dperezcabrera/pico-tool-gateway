@@ -114,7 +114,7 @@ class MemoryTicketStore:
 
     def __init__(self):
         self._tickets: dict[str, Ticket] = {}
-        self._claimed: set[str] = set()
+        self._claimed: dict[str, float] = {}  # ticket id -> when it was claimed
 
     async def create(self, ticket_id: str, call: ToolCall) -> None:
         self._tickets[ticket_id] = Ticket(copy.deepcopy(call), Decision(status=DecisionStatus.PENDING))
@@ -134,7 +134,17 @@ class MemoryTicketStore:
         ticket = self._tickets.get(ticket_id)
         if ticket is None or ticket.result is not None or ticket_id in self._claimed:
             return False
-        self._claimed.add(ticket_id)
+        self._claimed[ticket_id] = time.monotonic()
+        return True
+
+    async def close_stale_claim(self, ticket_id: str, *, older_than_seconds: float, result: ToolResult) -> bool:
+        ticket = self._tickets.get(ticket_id)
+        claimed_at = self._claimed.get(ticket_id)
+        if ticket is None or ticket.result is not None or claimed_at is None:
+            return False
+        if time.monotonic() - claimed_at < older_than_seconds:
+            return False
+        ticket.result = copy.deepcopy(result)
         return True
 
     async def pending(

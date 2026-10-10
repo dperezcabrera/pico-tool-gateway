@@ -63,10 +63,12 @@ class ToolGateway:
         steps: Sequence[GatewayStep] = (),
         signal: DecisionSignal | None = None,
         decision_recheck_seconds: float = 5.0,
+        execution_lease_seconds: float = 600,
     ):
         self._tickets = tickets
         self._audit = audit
         self._grants = grants
+        self._lease = execution_lease_seconds
         self._signal = signal or MemoryDecisionSignal()
         builtin = [
             audited(Authorize(grants), "authorize"),
@@ -89,6 +91,7 @@ class ToolGateway:
                 self._signal,
                 timeout_seconds=approval_timeout_seconds,
                 recheck_seconds=decision_recheck_seconds,
+                lease_seconds=execution_lease_seconds,
                 notifier=notifier,
             ),
             "approval",
@@ -148,4 +151,4 @@ class ToolGateway:
         ctx = CallContext(call=call, audit=self._audit, grant=grant)
         apply_decision(ctx, decision)
         await self._audit.audit_event("resumed", call, status=decision.status.value, approver=decision.approver)
-        return await run_once(self._tickets, ticket_id, lambda: self._post_approval.run(ctx))
+        return await run_once(self._tickets, ticket_id, lambda: self._post_approval.run(ctx), lease_seconds=self._lease)

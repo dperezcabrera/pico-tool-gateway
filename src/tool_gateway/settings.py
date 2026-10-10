@@ -12,6 +12,10 @@ class ToolGatewaySettings:
     # an interactive waiter rereads its ticket at least this often, in case a
     # decision signal was lost (e.g. the verdict landed on another replica)
     decision_recheck_seconds: float = 5.0
+    # an approved call still running after this long is presumed dead with its
+    # process and closed as interrupted (never re-run); keep it above your
+    # slowest tool
+    execution_lease_seconds: float = 600.0
     # path to a JSON policy file {"default": "deny", "rules": [...]}; the
     # plug-and-play artifact — edit it and POST /api/v1/policy/reload. Empty
     # means deny-all.

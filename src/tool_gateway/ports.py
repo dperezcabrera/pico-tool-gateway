@@ -74,6 +74,12 @@ class TicketStore(Protocol):
 
     async def complete(self, ticket_id: str, result: ToolResult) -> None: ...
 
+    async def close_stale_claim(self, ticket_id: str, *, older_than_seconds: float, result: ToolResult) -> bool:
+        """Store ``result`` if the ticket was claimed more than
+        ``older_than_seconds`` ago and still has none (its executor died).
+        Atomic: True for exactly one caller."""
+        ...
+
     async def pending(
         self, *, limit: int = 100, after: str | None = None, tool: str | None = None, agent_id: str | None = None
     ) -> dict[str, Ticket]:

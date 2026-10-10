@@ -34,15 +34,26 @@ def _new_ticket_id() -> str:
     return f"tkt-{uuid.uuid4().hex}"
 
 
-async def run_once(tickets: TicketStore, ticket_id: str, run) -> ToolResult:
+INTERRUPTED = (
+    "The approved call started but its executor stopped before reporting back (a gateway restart or crash), "
+    "so its outcome is unknown. It was not retried: check the upstream before submitting it again."
+)
+
+
+async def run_once(tickets: TicketStore, ticket_id: str, run, *, lease_seconds: float = 600) -> ToolResult:
     """Execute an approved ticket at most once and keep the outcome on it, so
     a repeated check or resume returns the stored result instead of calling
     the tool again. A failure is stored too: it is not retried behind the
-    operator's back."""
+    operator's back. A claim older than ``lease_seconds`` without a result
+    means its executor died: the ticket is closed as interrupted, never run
+    a second time (the call may have taken effect)."""
     if not await tickets.claim(ticket_id):
         ticket = await tickets.get(ticket_id)
         if ticket is not None and ticket.result is not None:
             return ticket.result
+        interrupted = ToolResult(content=INTERRUPTED, is_error=True)
+        if await tickets.close_stale_claim(ticket_id, older_than_seconds=lease_seconds, result=interrupted):
+            return interrupted
         raise PendingApproval(ticket_id)  # another caller is executing it right now
     try:
         result = await run()
@@ -77,12 +88,14 @@ class ApprovalGate:
         *,
         timeout_seconds: float = 300,
         recheck_seconds: float = 5.0,
+        lease_seconds: float = 600,
         notifier: ApproverNotifier | None = None,
     ):
         self._tickets = tickets
         self._signal = signal
         self._timeout = timeout_seconds
         self._recheck = recheck_seconds
+        self._lease = lease_seconds
         self._notifier = notifier
 
     async def _await_decision(self, ticket_id: str) -> Decision:
@@ -125,4 +138,4 @@ class ApprovalGate:
             decision = (await self._tickets.get(ticket_id)).decision
         await ctx.audit.audit_event("decided", ctx.call, status=decision.status.value, approver=decision.approver)
         apply_decision(ctx, decision)
-        return await run_once(self._tickets, ticket_id, lambda: call_next(ctx))
+        return await run_once(self._tickets, ticket_id, lambda: call_next(ctx), lease_seconds=self._lease)

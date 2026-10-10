@@ -1,6 +1,6 @@
 import asyncio
 import dataclasses
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pico_ioc import component
@@ -20,6 +20,7 @@ class TicketRow(AppBase):
     call: Mapped[dict] = mapped_column(JSON)
     decision: Mapped[dict] = mapped_column(JSON)
     claimed: Mapped[bool] = mapped_column(default=False)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -104,9 +105,24 @@ class SqlTicketStore:
             won = await session.execute(
                 update(TicketRow)
                 .where(TicketRow.id == ticket_id, TicketRow.claimed.is_(False), TicketRow.result.is_(None))
-                .values(claimed=True)
+                .values(claimed=True, claimed_at=datetime.now(UTC))
             )
             return won.rowcount == 1
+
+    async def close_stale_claim(self, ticket_id: str, *, older_than_seconds: float, result: ToolResult) -> bool:
+        cutoff = datetime.now(UTC) - timedelta(seconds=older_than_seconds)
+        async with self._sessions.transaction() as session:
+            closed = await session.execute(
+                update(TicketRow)
+                .where(
+                    TicketRow.id == ticket_id,
+                    TicketRow.claimed.is_(True),
+                    TicketRow.result.is_(None),
+                    TicketRow.claimed_at <= cutoff,
+                )
+                .values(result=dataclasses.asdict(result))
+            )
+            return closed.rowcount == 1
 
     async def pending(
         self, *, limit: int = 100, after: str | None = None, tool: str | None = None, agent_id: str | None = None
