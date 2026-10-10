@@ -205,3 +205,24 @@ async def test_the_source_is_asked_at_most_once_per_interval():
     for _ in range(100):
         await p.grant_for(call("github.get_pr"))
     assert Counting.loads == 1
+
+
+async def test_may_call_decides_visibility_without_arguments():
+    p = DeclarativePolicy(
+        rules=[
+            {"tool": "payments.charge", "when": [{"arg": "amount_cents", "op": "gt", "value": 10**6}], "deny": True},
+            {"tool": "payments.*", "when": [{"arg": "amount_cents", "op": "le", "value": 100}], "mode": "auto"},
+            {"tool": "github.get_*", "mode": "auto"},
+            {"tool": "github.*", "deny": True},
+        ]
+    )
+    assert await p.may_call(call("payments.charge"))  # a conditional deny may not apply; a conditional allow can
+    assert await p.may_call(call("github.get_pr"))
+    assert not await p.may_call(call("github.delete_repo"))  # unconditional deny
+    assert not await p.may_call(call("slack.post"))  # nothing matches: default deny
+
+
+async def test_may_call_follows_the_default_and_agent_rules():
+    p = DeclarativePolicy(default="auto", rules=[{"tool": "*", "agent": "intern-*", "deny": True}])
+    assert await p.may_call(call("x.y", agent="senior"))
+    assert not await p.may_call(call("x.y", agent="intern-1"))

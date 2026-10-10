@@ -16,7 +16,11 @@ from .domain import ApprovalMode, Decision, Grant, Ticket, ToolCall, ToolResult
 @runtime_checkable
 class GrantResolver(Protocol):
     """Authorize a call and resolve its approval mode + schema.
-    Returns None when the agent may not run the tool."""
+    Returns None when the agent may not run the tool.
+
+    Optionally also ``async may_call(call) -> bool``: whether the agent could
+    call the tool with some arguments. When present, ``tools/list`` only shows
+    those tools; without it every catalog tool is listed."""
 
     async def grant_for(self, call: ToolCall) -> Grant | None: ...
 

@@ -97,7 +97,8 @@ class _Rule:
     mode: ApprovalMode | None
     input_schema: dict | None
 
-    def matches(self, call: ToolCall, trusted: bool) -> bool:
+    def targets(self, call: ToolCall, trusted: bool) -> bool:
+        """Tool, agent and hints match; the argument conditions are not checked."""
         if not fnmatchcase(call.full_name, self.tool):
             return False
         if not any(fnmatchcase(call.agent_id, g) for g in self.agents):
@@ -106,7 +107,10 @@ class _Rule:
             effective = _effective_hints(call.annotations if trusted else {})
             if any(effective[k] != v for k, v in self.hints.items()):
                 return False
-        return all(c.holds(call.arguments) for c in self.conds)
+        return True
+
+    def matches(self, call: ToolCall, trusted: bool) -> bool:
+        return self.targets(call, trusted) and all(c.holds(call.arguments) for c in self.conds)
 
 
 def _compile_rule(raw: dict) -> _Rule:
@@ -243,6 +247,23 @@ class DeclarativePolicy:
             if rule.matches(call, trusted):
                 return None if rule.deny else Grant(rule.mode, rule.input_schema)
         return policy.default
+
+    async def may_call(self, call: ToolCall) -> bool:
+        """Could this agent call this tool with some arguments? Decides what
+        ``tools/list`` shows, before any arguments exist: an unconditional
+        rule is final, a conditional allow means "yes, for some arguments",
+        and a conditional deny might not apply, so the search goes on."""
+        await self._refresh_if_due()
+        policy = self._compiled
+        if policy is None:
+            return False
+        trusted = any(fnmatchcase(call.upstream_id, g) for g in policy.trust)
+        for rule in policy.rules:
+            if not rule.targets(call, trusted):
+                continue
+            if not rule.conds or not rule.deny:
+                return not rule.deny
+        return policy.default is not None
 
     async def publish(self, doc: dict, *, by: str = "") -> str:
         """Validate, store as the new version for every replica, apply here now."""

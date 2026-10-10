@@ -7,13 +7,20 @@ import sys
 import pytest
 from pico_ioc import component
 
-from tool_gateway.adapters.memory import EchoUpstream
+from tool_gateway.adapters.memory import DictToolCatalog, EchoUpstream
 from tool_gateway.ports import Upstream  # noqa: F401
 
 
 @component
 class _Upstream(EchoUpstream):
     pass
+
+
+@component
+class _Catalog(DictToolCatalog):
+    def __init__(self):
+        names = ["github.get_pr", "github.delete_repo", "github.create_pr"]
+        super().__init__({"agent-1": [{"name": n, "description": n, "inputSchema": {}} for n in names]})
 
 
 POLICY = {
@@ -130,3 +137,13 @@ def test_policy_is_operator_only(harness):
     agent = bearer(container, "agent-1", "agent")
     assert client.post("/api/v1/policy", json={"rules": []}, headers=agent).status_code == 403
     assert client.get("/api/v1/policy", headers=agent).status_code == 403
+
+
+def test_tools_list_hides_what_the_policy_denies(harness):
+    client, container, _ = harness
+    agent = bearer(container, "agent-1", "agent")
+    listed = client.post(
+        "/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, headers=agent
+    ).json()
+    names = {tool["name"] for tool in listed["result"]["tools"]}
+    assert names == {"github.get_pr", "github.delete_repo", "gateway.check"}  # create_pr falls to default deny

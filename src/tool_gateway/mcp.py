@@ -133,7 +133,7 @@ class McpEdge:
 
     async def _list_tools(self, ctx, params) -> types.ListToolsResult:
         agent_id = SecurityContext.require().sub
-        specs = await self._catalog.tools_for(agent_id)
+        specs = await self._gw.visible_tools(agent_id, await self._catalog.tools_for(agent_id))
         return types.ListToolsResult(tools=[*(_tool(s) for s in specs), _CHECK_TOOL])
 
     async def _call_tool(self, ctx, params: types.CallToolRequestParams) -> types.CallToolResult:

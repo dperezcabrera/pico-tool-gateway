@@ -113,6 +113,21 @@ class ToolGateway:
         except PendingApproval as pending:
             return Pending(pending.ticket_id)
 
+    async def visible_tools(self, agent_id: str, specs: list[dict]) -> list[dict]:
+        """The catalog entries this agent may call. Uses the GrantResolver's
+        optional ``may_call(call)``; a resolver without it lists everything
+        (the call is still authorized when made)."""
+        may_call = getattr(self._grants, "may_call", None)
+        if may_call is None:
+            return specs
+        visible = []
+        for spec in specs:
+            upstream_id, _, tool_name = spec["name"].partition(".")
+            call = ToolCall("list", agent_id, upstream_id, tool_name, {}, annotations=spec.get("annotations") or {})
+            if await may_call(call):
+                visible.append(spec)
+        return visible
+
     async def decide(self, ticket_id: str, decision: Decision) -> None:
         """Record an operator verdict on a pending ticket, once, and audit it.
         ``decision.approver`` must be the verified operator, not a claim."""
